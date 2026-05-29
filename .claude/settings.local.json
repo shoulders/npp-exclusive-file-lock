@@ -6,7 +6,8 @@
       "Bash(Format-Table FullName)",
       "Bash(Get-ChildItem -Path \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin\" -Force)",
       "Bash(Select-Object Name, Mode)",
-      "Bash(Format-Table -AutoSize)"
+      "Bash(Format-Table -AutoSize)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

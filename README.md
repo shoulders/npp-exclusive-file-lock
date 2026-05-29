@@ -13,19 +13,33 @@ The lock is implemented with a single Win32 `CreateFile()` call:
 ```cpp
 HANDLE hFile = CreateFileW(
     filePath,
-    GENERIC_READ,           // Minimal access needed to hold the lock
-    FILE_SHARE_READ,        // Share READ only — deny WRITE and DELETE
-    nullptr,                // Default security attributes
-    OPEN_EXISTING,          // File must already exist
-    FILE_ATTRIBUTE_NORMAL,  // No special flags
-    nullptr                 // No template file
+    GENERIC_READ,                        // Minimal access needed to hold the lock
+    FILE_SHARE_READ | FILE_SHARE_WRITE,  // See share-mode notes below
+    nullptr,                             // Default security attributes
+    OPEN_EXISTING,                       // File must already exist
+    FILE_ATTRIBUTE_NORMAL,               // No special flags
+    nullptr                              // No template file
 );
 ```
 
-| Share mode omitted | Effect on competing processes |
-|---|---|
-| `FILE_SHARE_WRITE` | Any attempt to open the file for writing receives `ERROR_SHARING_VIOLATION` (0x20) |
-| `FILE_SHARE_DELETE` | Any attempt to rename or delete the file receives `ERROR_SHARING_VIOLATION` |
+**Why `FILE_SHARE_WRITE`?**
+Notepad++ opens files with `FILE_SHARE_READ | FILE_SHARE_WRITE` internally,
+so our `CreateFile` call must also grant `FILE_SHARE_WRITE` or it will fail
+with `ERROR_SHARING_VIOLATION` against Notepad++'s already-open handle.
+Granting `FILE_SHARE_WRITE` in our handle does **not** allow external editors
+to write: Windows share-mode rules require both sides to agree.  An external
+editor that opens with `GENERIC_WRITE` but without `FILE_SHARE_WRITE` in its
+own `dwShareMode` still receives `ERROR_SHARING_VIOLATION`, because Notepad++
+holds a `GENERIC_WRITE` handle that the external editor's share mode must
+cover.  Standard editors behave this way, so they are blocked.
+
+**Why `FILE_SHARE_DELETE` is intentionally omitted:**
+Granting `FILE_SHARE_DELETE` would allow any process to open the file with
+`DELETE` access, enabling overwrite-by-rename (write to a temp file, then
+rename it over the locked file) — this would defeat the lock entirely.  As a
+side effect, external rename or move of the locked file is also blocked.  Use
+the **Rename Current File…** menu command to rename a locked file safely
+(see *Menu items* below).
 
 Notepad++ uses its **own** separate handle for reading and saving, so the
 plugin does not interfere with normal editor operations.
@@ -52,6 +66,7 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 |---|---|
 | File opened | If locking is **ON**, the new file is locked immediately. |
 | File saved (including Save-As) | Lock is re-acquired on the new path so the handle always matches the on-disk file. |
+| File renamed in Notepad++ | `NPPN_FILEBEFORERENAME`: lock released. `NPPN_FILERENAMED`: lock re-acquired on new path. `NPPN_FILERENAMECANCEL`: lock restored on original path. |
 | File tab closed | Lock is **always** released, regardless of the on/off state. |
 | Notepad++ shutdown | All locks are released. |
 
@@ -316,6 +331,28 @@ our lock does not conflict with that handle.
 The **Lock Current File** command will show an error message. The file cannot
 be locked by this plugin until the competing handle is released.
 
+**Can I rename the file while it is open and locked?**
+Yes — use Notepad++'s own rename function (right-click the tab → Rename, or
+File > Rename, depending on your build).  The rename happens transparently:
+
+1. `WM_COMMAND 41017` (`IDM_FILE_RENAME`) is dequeued → plugin releases all
+   locks so nothing blocks `MoveFileExW`.
+2. The rename dialog is shown; `WM_ACTIVATE` fires when it closes (this is
+   *before* `MoveFileExW`, so the plugin deliberately ignores it).
+3. `WM_COMMAND 22003` is dequeued → plugin re-releases any accidentally
+   re-acquired locks and arms the outcome detector.
+4. **Success:** `MoveFileExW` runs, Notepad++ updates the title bar
+   (`WM_SETTEXT`) → plugin detects the old file is gone, re-locks under the
+   new name, and updates path tracking.
+5. **Cancel:** `WM_SETTEXT` fires with the file still on disk → plugin
+   restores the original lock.
+
+External renames (Windows Explorer, command line) are still blocked.
+
+External renames (Windows Explorer, command line, etc.) are still blocked
+because the lock handle omits `FILE_SHARE_DELETE` and there is no message to
+intercept for those operations.
+
 **Does the lock survive a Save-As to a new path?**
 Yes. The plugin listens for `NPPN_FILESAVED`, releases the old handle (on the
 old path), and re-acquires a new one on the current path automatically.
@@ -325,11 +362,16 @@ It depends on the network file system and server configuration. Locking
 behaviour on network shares (SMB, NFS, etc.) is governed by the server and
 is not guaranteed by this plugin.
 
-**Why does the plugin use `FILE_SHARE_READ` instead of zero share mode?**
-Using share mode `0` (no sharing at all) would also prevent Notepad++ itself
-from reading the file, causing the editor to fail on its next read or save.
-`FILE_SHARE_READ` strikes the right balance: other processes can still read
-the file (including Notepad++), but they cannot write to or delete it.
+**Why does the plugin grant `FILE_SHARE_WRITE` but not `FILE_SHARE_DELETE`?**
+`FILE_SHARE_WRITE` is required so our handle can coexist with Notepad++'s own
+write-capable handle — without it, `CreateFile` fails immediately against
+Notepad++'s already-open handle.  Granting it does not let external editors
+write freely, because Windows share-mode rules require both handles to agree;
+standard editors open with restrictive share modes and are still blocked.
+`FILE_SHARE_DELETE` is intentionally omitted because granting it would allow
+any process to open the file with `DELETE` access — enough to delete it or
+replace it via an atomic rename-over, defeating the lock.  Rename support is
+provided through the **Rename Current File…** plugin command instead.
 
 ---
 

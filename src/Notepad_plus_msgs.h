@@ -195,4 +195,20 @@
 // getCurrentFilePath().
 #define NPPN_BUFFERACTIVATED (NPPN_FIRST + 10)
 
+// Notepad++ is about to rename the currently active file.
+// nmhdr.idFrom = buffer ID of the file being renamed.
+// Release any handles that deny FILE_SHARE_DELETE here so that
+// MoveFileExW (called by Notepad++) can proceed.
+#define NPPN_FILEBEFORERENAME  (NPPN_FIRST + 21)
+
+// The rename was cancelled (e.g. user dismissed the rename dialog or the
+// MoveFileExW call failed).  nmhdr.idFrom = buffer ID.
+// Restore any handles that were released in NPPN_FILEBEFORERENAME.
+#define NPPN_FILERENAMECANCEL  (NPPN_FIRST + 22)
+
+// The file has been renamed successfully.
+// nmhdr.idFrom = buffer ID.  The title bar now reflects the new filename.
+// Re-acquire handles / update path tracking for the new path.
+#define NPPN_FILERENAMED       (NPPN_FIRST + 23)
+
 #endif  // NOTEPAD_PLUS_MSGS_H

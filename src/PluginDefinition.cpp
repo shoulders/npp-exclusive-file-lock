@@ -27,6 +27,14 @@
 // so they are blocked as intended.  The lock is removed by calling
 // CloseHandle() on the HANDLE.
 //
+// FILE_SHARE_DELETE is intentionally omitted.  Including it would allow any
+// process to open the file with DELETE access, enabling overwrite-via-rename
+// (delete + rename a temp file over the locked file), which would defeat the
+// purpose of the lock.  As a consequence, external rename/move of the locked
+// file is also blocked.  Use "Rename Current File…" from this plugin's menu
+// to rename a locked file: the plugin temporarily releases its lock, performs
+// the MoveFileExW call, then immediately re-acquires the lock on the new path.
+//
 // Notepad++ continues to work normally because it already holds a compatible
 // handle, and our lock handle does not deny readers.
 //
@@ -133,6 +141,49 @@ static bool g_enumerating = false;
 //   NPPN_FILEBEFORECLOSE does not fire in this Notepad++ build.
 static HWND g_tabHwnd      = nullptr;
 static int  g_prevTabCount = 0;
+
+// g_renamePendingLocks
+//   Maps buffer ID to pre-rename path for any file whose lock was released in
+//   NPPN_FILEBEFORERENAME.  The entry is consumed in NPPN_FILERENAMED (re-lock
+//   on new path) or NPPN_FILERENAMECANCEL (re-lock on original path).
+//   Secondary mechanism — NPPN_FILEBEFORERENAME does not fire in this build;
+//   the primary mechanism uses WH_GETMESSAGE to intercept IDM_FILE_RENAME.
+static std::map<uptr_t, std::wstring> g_renamePendingLocks;
+
+// g_hGetMsgHook
+//   WH_GETMESSAGE hook installed on Notepad++'s UI thread.
+//   Fires when a posted message is retrieved from the message queue (i.e.
+//   inside GetMessage / PeekMessage), before DispatchMessage is called.
+//   Menu commands are posted (PostMessage), not sent (SendMessage), so they
+//   are NOT visible to WH_CALLWNDPROC — WH_GETMESSAGE is required.
+//   Used to release the lock just before Notepad++ dispatches IDM_FILE_RENAME
+//   (WM_COMMAND 41017), so that MoveFileExW inside Notepad++ can proceed.
+static HHOOK g_hGetMsgHook = nullptr;
+
+// g_preRenameLockedPaths
+//   All paths locked when IDM_FILE_RENAME (41017) was dequeued.  Every lock is
+//   released immediately so that whichever file Notepad++ renames is not blocked.
+//   Cleared once the rename outcome is confirmed (see g_renameOpDispatched).
+static std::vector<std::wstring> g_preRenameLockedPaths;
+
+// g_renameOpDispatched
+//   Set when WM_COMMAND 22003 is dequeued.  This is the command that causes
+//   Notepad++ to call MoveFileExW; it fires after WM_ACTIVATE (dialog closed).
+//   Once this flag is set, the next WM_SETTEXT in titleBarHookProc resolves the
+//   rename outcome:
+//     • A locked path is gone from disk → rename succeeded → re-lock under new name.
+//     • All paths still exist          → rename cancelled  → restore all locks.
+static bool g_renameOpDispatched = false;
+
+// IDM_FILE_RENAME_EXEC — the WM_COMMAND ID that Notepad++ posts when it is
+// about to call MoveFileExW, fired after the rename dialog closes.
+// Determined empirically from the WM_COMMAND log (captured while files were locked).
+static const UINT IDM_FILE_RENAME_EXEC = 22003;
+
+// IDM_FILE_RENAME — Notepad++ menu command ID for "Rename" (IDM_FILE + 17).
+// IDM_FILE = IDM + 1000 = 41000;  IDM_FILE_RENAME = 41000 + 17 = 41017.
+static const UINT IDM_FILE_RENAME = 41017;
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 2 – Internal file-lock helpers
@@ -343,6 +394,66 @@ static std::vector<std::wstring> enumerateOpenFilePaths()
     return result;
 }
 
+// ── getMsgHookProc ────────────────────────────────────────────────────────────
+//
+// WH_GETMESSAGE hook procedure.  Fires when a posted message is retrieved from
+// the Notepad++ UI thread's message queue (inside GetMessage or PeekMessage),
+// BEFORE DispatchMessage is called for that message.
+//
+// Menu commands (including right-click tab → Rename) arrive via PostMessage,
+// not SendMessage, so they are invisible to WH_CALLWNDPROC/RET.  This hook
+// is the correct place to intercept them.
+//
+// When WM_COMMAND / IDM_FILE_RENAME (41017) is retrieved, we:
+//   1. Record the locked path in g_preRenameUnlockedPath.
+//   2. Release our lock handle (CloseHandle).
+// After the hook returns, DispatchMessage is called: Notepad++ shows the
+// rename dialog, the user confirms, MoveFileExW succeeds (our handle is gone),
+// and Notepad++ calls SetWindowText with the new title.
+//
+// The lock is then re-acquired in titleBarHookProc:
+//   • WM_SETTEXT (title changed)  → rename succeeded → lock new path.
+//   • WM_ACTIVATE (main window re-activated, old file on disk) → cancelled →
+//     restore lock on original path.
+// ─────────────────────────────────────────────────────────────────────────────
+static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    // wParam == PM_REMOVE means the message is being consumed from the queue.
+    if (nCode == HC_ACTION && wParam == PM_REMOVE)
+    {
+        const MSG* msg = reinterpret_cast<const MSG*>(lParam);
+        if (msg->message == WM_COMMAND)
+        {
+            UINT cmdId = LOWORD(msg->wParam);
+
+            if (cmdId == IDM_FILE_RENAME && !g_lockMap.empty())
+            {
+                // Release every lock so that whichever file Notepad++ renames
+                // (active tab or not) is not blocked by our handle.
+                g_preRenameLockedPaths.clear();
+                g_renameOpDispatched = false;
+                for (const auto& kv : g_lockMap)
+                    g_preRenameLockedPaths.push_back(kv.first);
+                for (const auto& p : g_preRenameLockedPaths)
+                    unlockPath(p);
+            }
+
+            // IDM_FILE_RENAME_EXEC (22003) fires after the rename dialog closes,
+            // just before Notepad++ calls MoveFileExW.  WM_ACTIVATE fires first
+            // (dialog closed), which is why we must NOT re-lock on WM_ACTIVATE.
+            // Re-release any locks that WM_ACTIVATE may have restored, and set
+            // the flag so the next WM_SETTEXT resolves cancel vs success.
+            if (cmdId == IDM_FILE_RENAME_EXEC && !g_preRenameLockedPaths.empty())
+            {
+                g_renameOpDispatched = true;
+                for (const auto& p : g_preRenameLockedPaths)
+                    if (g_lockMap.count(p)) unlockPath(p);
+            }
+        }
+    }
+    return ::CallNextHookEx(g_hGetMsgHook, nCode, wParam, lParam);
+}
+
 // ── titleBarHookProc ─────────────────────────────────────────────────────────
 //
 // WH_CALLWNDPROCRET hook procedure.  Fires after every message is fully
@@ -396,14 +507,57 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                 g_prevTabCount = currentCount;
             }
 
-            // Auto-lock the newly active file if locking is enabled.
-            if (g_lockingEnabled)
+            // Determine the path now shown in the (just-updated) title bar.
+            std::wstring currentPath = getCurrentFilePath();
+
+            if (!g_preRenameLockedPaths.empty())
             {
-                std::wstring path = getCurrentFilePath();
-                if (!path.empty() && !g_lockMap.count(path))
-                    lockPath(path);
+                // Check whether any of the previously-locked files is now gone.
+                std::wstring renamedFrom;
+                for (const auto& p : g_preRenameLockedPaths)
+                {
+                    if (::GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    {
+                        renamedFrom = p;
+                        break;
+                    }
+                }
+
+                if (!renamedFrom.empty() && !currentPath.empty())
+                {
+                    // Rename succeeded — re-lock under new name.
+                    for (auto& kv : g_idToPath)
+                        if (kv.second == renamedFrom)
+                            kv.second = currentPath;
+                    for (const auto& p : g_preRenameLockedPaths)
+                        lockPath(p == renamedFrom ? currentPath : p);
+                    g_preRenameLockedPaths.clear();
+                    g_renameOpDispatched = false;
+                }
+                else if (g_renameOpDispatched)
+                {
+                    // IDM_FILE_RENAME_EXEC fired but no file disappeared →
+                    // rename was cancelled or failed.  Restore all locks.
+                    for (const auto& p : g_preRenameLockedPaths)
+                        lockPath(p);
+                    g_preRenameLockedPaths.clear();
+                    g_renameOpDispatched = false;
+                }
+                // else: IDM_FILE_RENAME_EXEC hasn't fired yet (dialog still open
+                // or WM_SETTEXT is a title refresh mid-dialog).  Wait.
+            }
+            else if (g_lockingEnabled && !currentPath.empty()
+                     && !g_lockMap.count(currentPath))
+            {
+                // Normal auto-lock on file open / tab switch.
+                lockPath(currentPath);
             }
         }
+
+        // NOTE: WM_ACTIVATE fires when the rename dialog closes, BEFORE
+        // IDM_FILE_RENAME_EXEC (22003) and before MoveFileExW.  Re-locking
+        // here would block the rename.  Cancel detection is handled in the
+        // WM_SETTEXT block above once g_renameOpDispatched is set.
     }
     return ::CallNextHookEx(g_hTitleHook, nCode, wParam, lParam);
 }
@@ -429,7 +583,8 @@ void pluginInit(HANDLE /*hModule*/)
 // ─────────────────────────────────────────────────────────────────────────────
 void pluginCleanUp()
 {
-    if (g_hTitleHook) { ::UnhookWindowsHookEx(g_hTitleHook); g_hTitleHook = nullptr; }
+    if (g_hGetMsgHook) { ::UnhookWindowsHookEx(g_hGetMsgHook); g_hGetMsgHook = nullptr; }
+    if (g_hTitleHook)  { ::UnhookWindowsHookEx(g_hTitleHook);  g_hTitleHook  = nullptr; }
     releaseAllLocks();
 }
 
@@ -695,13 +850,21 @@ extern "C" __declspec(dllexport) void setInfo(NppData notepadPlusData)
     g_nppData = notepadPlusData;
     commandMenuInit();
 
-    // Install the title-bar hook here rather than in NPPN_READY, because
-    // NPPN_READY does not fire in this Notepad++ build.
+    // Install both message hooks here rather than in NPPN_READY (which never
+    // fires in this build).
+    //   g_hGetMsgHook – WH_GETMESSAGE: fires when a posted message (e.g. a
+    //                   menu command) is retrieved from the queue, before
+    //                   DispatchMessage.  Releases the lock for IDM_FILE_RENAME.
+    //   g_hTitleHook  – WH_CALLWNDPROCRET: fires after sent messages are
+    //                   processed.  Handles WM_SETTEXT (re-lock new path) and
+    //                   WM_ACTIVATE (cancel detection).
     if (!g_hTitleHook)
     {
         DWORD tid = ::GetWindowThreadProcessId(g_nppData._nppHandle, nullptr);
-        g_hTitleHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET,
-                                           titleBarHookProc, nullptr, tid);
+        g_hGetMsgHook = ::SetWindowsHookEx(WH_GETMESSAGE,
+                                            getMsgHookProc, nullptr, tid);
+        g_hTitleHook  = ::SetWindowsHookEx(WH_CALLWNDPROCRET,
+                                            titleBarHookProc, nullptr, tid);
     }
 }
 
@@ -737,6 +900,20 @@ extern "C" __declspec(dllexport) FuncItem* getFuncsArray(int* nbF)
 //     A file was saved (including Save-As).  On Save-As the path changes;
 //     detect this by comparing the path in g_idToPath against the current
 //     title-bar path.  Re-acquire the lock on the new path if needed.
+//
+//   NPPN_FILEBEFORERENAME
+//     Notepad++ is about to rename the active file.  Release our lock so that
+//     our handle (which omits FILE_SHARE_DELETE) does not block MoveFileExW.
+//     The old path is saved in g_renamePendingLocks so it can be restored if
+//     the rename is cancelled.
+//
+//   NPPN_FILERENAMED
+//     Rename succeeded.  The title bar has already been updated.  Re-acquire
+//     the lock on the new path and update g_idToPath.  (The titleBarHookProc
+//     fires on the same WM_SETTEXT and may lock first; lockPath() is idempotent.)
+//
+//   NPPN_FILERENAMECANCEL
+//     Rename was cancelled.  Restore the lock on the original path.
 //
 //   NPPN_FILEBEFORECLOSE
 //     A tab is about to close.  Look up its path in g_idToPath and release
@@ -835,6 +1012,52 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
             break;
         }
 
+        case NPPN_FILEBEFORERENAME:
+        {
+            // Release our lock so MoveFileExW can proceed.
+            // (Our handle lacks FILE_SHARE_DELETE; Notepad++'s own handle grants it,
+            // so the rename succeeds once ours is closed.)
+            std::wstring path;
+            auto idIt = g_idToPath.find(bufferId);
+            path = (idIt != g_idToPath.end()) ? idIt->second : getCurrentFilePath();
+
+            if (!path.empty() && g_lockMap.count(path))
+            {
+                g_renamePendingLocks[bufferId] = path;
+                unlockPath(path);
+            }
+            break;
+        }
+
+        case NPPN_FILERENAMED:
+        {
+            // Rename succeeded.  Title bar already shows the new path.
+            std::wstring newPath = getCurrentFilePath();
+            if (!newPath.empty())
+                g_idToPath[bufferId] = newPath;
+
+            auto it = g_renamePendingLocks.find(bufferId);
+            if (it != g_renamePendingLocks.end())
+            {
+                g_renamePendingLocks.erase(it);
+                if (!newPath.empty())
+                    lockPath(newPath); // idempotent if titleBarHookProc already locked
+            }
+            break;
+        }
+
+        case NPPN_FILERENAMECANCEL:
+        {
+            // Rename was cancelled — restore the lock on the original path.
+            auto it = g_renamePendingLocks.find(bufferId);
+            if (it != g_renamePendingLocks.end())
+            {
+                lockPath(it->second);
+                g_renamePendingLocks.erase(it);
+            }
+            break;
+        }
+
         case NPPN_FILEBEFORECLOSE:
         {
             auto it = g_idToPath.find(bufferId);
@@ -853,10 +1076,14 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
         }
 
         case NPPN_SHUTDOWN:
-            if (g_hTitleHook) { ::UnhookWindowsHookEx(g_hTitleHook); g_hTitleHook = nullptr; }
+            if (g_hGetMsgHook) { ::UnhookWindowsHookEx(g_hGetMsgHook); g_hGetMsgHook = nullptr; }
+            if (g_hTitleHook)  { ::UnhookWindowsHookEx(g_hTitleHook);  g_hTitleHook  = nullptr; }
             commandMenuCleanUp();
             releaseAllLocks();
             g_idToPath.clear();
+            g_renamePendingLocks.clear();
+            g_preRenameLockedPaths.clear();
+            g_renameOpDispatched = false;
             break;
 
         default:
