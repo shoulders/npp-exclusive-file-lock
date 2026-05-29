@@ -1,0 +1,7 @@
+/.vscode/
+/localonly/
+/nbproject/
+/vendor/
+/vs.proj/FileLockPlugin/
+/vs.proj/x64/
+/.php_cs.cache

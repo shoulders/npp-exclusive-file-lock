@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Get-ChildItem -Path \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\" -Recurse -Force)",
+      "Bash(Select-Object -First 50)",
+      "Bash(Format-Table FullName)",
+      "Bash(Get-ChildItem -Path \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin\" -Force)",
+      "Bash(Select-Object Name, Mode)",
+      "Bash(Format-Table -AutoSize)"
+    ]
+  }
+}

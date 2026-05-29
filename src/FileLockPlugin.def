@@ -1,0 +1,42 @@
+; FileLockPlugin.def
+;
+; Module Definition File for FileLockPlugin.dll
+;
+; PURPOSE
+; ───────
+; When MSVC compiles a C++ DLL it applies "name decoration" (also called
+; "name mangling") to exported symbols.  For example, a function declared as:
+;
+;     void __cdecl getName();
+;
+; might be exported as "_getName" (x86) or "getName" (x64), but a function
+; with parameters may get a much longer decorated name.
+;
+; Notepad++ locates plugin exports by their EXACT undecorated names using
+; GetProcAddress().  If any name is wrong the DLL is silently ignored.
+;
+; Listing the names in an EXPORTS section forces the linker to publish them
+; without any decoration, regardless of calling convention or compiler version.
+;
+; USAGE
+; ─────
+; In Visual Studio: Project Properties > Linker > Input > Module Definition File
+; On the command line: link ... /DEF:FileLockPlugin.def
+;
+; EXPORTED FUNCTIONS
+; ──────────────────
+; The six names below are the EXACT strings Notepad++ passes to GetProcAddress.
+; They must never be renamed, reordered, or removed.
+
+LIBRARY "FileLockPlugin"
+
+EXPORTS
+    ; ── Mandatory Notepad++ plugin interface ──────────────────────────────
+    ; Called by Notepad++ in this order at startup:
+    isUnicode           ; Must return TRUE (Unicode build required)
+    setInfo             ; Receives NppData (window handles)
+    getName             ; Returns the plugin's display name
+    getFuncsArray       ; Returns the menu-item array
+    ; Called repeatedly at runtime:
+    beNotified          ; Receives every Npp/Scintilla event notification
+    messageProc         ; Receives Windows messages forwarded by Notepad++
