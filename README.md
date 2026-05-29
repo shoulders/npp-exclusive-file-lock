@@ -57,6 +57,8 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 | **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
 | **Unlock Current File** | Releases the lock on the active tab's file without closing the tab. |
 | **Show Lock Status** | Message box listing every currently locked file and the on/off state. |
+| *(separator)* | — |
+| **Add Read-only** | When enabled (✔), also sets `FILE_ATTRIBUTE_READONLY` on each locked file. See [*Add Read-only option*](#add-read-only-option) below. |
 
 ---
 
@@ -69,6 +71,43 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 | File renamed in Notepad++ | `NPPN_FILEBEFORERENAME`: lock released. `NPPN_FILERENAMED`: lock re-acquired on new path. `NPPN_FILERENAMECANCEL`: lock restored on original path. |
 | File tab closed | Lock is **always** released, regardless of the on/off state. |
 | Notepad++ shutdown | All locks are released. |
+
+---
+
+## Add Read-only option
+
+Some applications ignore Win32 exclusive file locks entirely and will overwrite
+a locked file without any error.  The most common example is **Windows
+Notepad** (`notepad.exe`): it opens files with permissive share flags, so it
+does not receive `ERROR_SHARING_VIOLATION` and can silently overwrite a file
+that this plugin has locked.
+
+Enabling **Add Read-only** adds a second layer of protection.  When the option
+is on, the plugin calls `SetFileAttributes` to add `FILE_ATTRIBUTE_READONLY` to
+every locked file.  Applications that bypass share-mode locking almost always
+check this flag and will either refuse to save or prompt the user before
+overwriting a read-only file.
+
+### What changes when Add Read-only is on
+
+| Event | Behaviour |
+|---|---|
+| File locked (auto or manual) | `FILE_ATTRIBUTE_READONLY` is set.  The original attribute value is saved internally. |
+| File saved from Notepad++ | The flag is **temporarily cleared** just before Notepad++ writes, then **restored immediately** after the save completes — so saving works normally from Notepad++ while the file remains read-only to everything else. |
+| File unlocked (any reason) | The original attribute value is restored exactly as it was before the plugin touched it. |
+| Tab closed | Original attributes restored and lock released. |
+| **Toggle File Locking** turned OFF | All locks released; all attributes restored. |
+| **Add Read-only** turned OFF | All attributes restored; locks remain held. |
+| Notepad++ shutdown | All locks released; all attributes restored. |
+
+### Limitations
+
+- The read-only attribute is an advisory signal, not a security boundary.
+  Any process running with sufficient privileges (e.g. as Administrator) can
+  clear the flag and write to the file anyway.
+- If Notepad++ crashes or is force-killed, the attribute may be left in the
+  read-only state.  To recover, open File Explorer, right-click the file →
+  Properties, and untick **Read-only**.
 
 ---
 

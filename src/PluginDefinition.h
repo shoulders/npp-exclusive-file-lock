@@ -50,8 +50,10 @@ const TCHAR PLUGIN_NAME[] = _T("ExclusiveFileLock");
 //   [2] Lock Current File              ← manually lock active tab
 //   [3] Unlock Current File            ← manually unlock active tab
 //   [4] Show Lock Status               ← show all currently-locked files
+//   [5] ---                            ← separator
+//   [6] Add Read-only                  ← set FILE_ATTRIBUTE_READONLY on locked files
 //
-const int nbFunc = 5;
+const int nbFunc = 7;
 
 //--------------------------------------------//
 //-- STEP 3. CUSTOMIZE YOUR PLUGIN COMMANDS --//
@@ -72,6 +74,9 @@ void unlockCurrentFile();
 
 // Displays a message box listing every file currently locked by this plugin.
 void showLockStatus();
+
+// Toggles the "add read-only attribute" option on locked files.
+void toggleAddReadOnly();
 
 //----------------------------------------------//
 //-- STEP 4. DEFINE YOUR ASSOCIATED FUNCTIONS --//

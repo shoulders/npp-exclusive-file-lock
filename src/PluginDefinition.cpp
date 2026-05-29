@@ -62,6 +62,8 @@
 //  [2]   Lock Current File            Manually locks the active tab
 //  [3]   Unlock Current File          Manually releases the active tab's lock
 //  [4]   Show Lock Status             Message box listing all locked files
+//  [5]   (separator)                  Empty name → Notepad++ renders a line
+//  [6]   Add Read-only                Toggles FILE_ATTRIBUTE_READONLY on locked files
 //
 // NOTEPAD++ MESSAGE USAGE
 // ───────────────────────
@@ -184,6 +186,35 @@ static const UINT IDM_FILE_RENAME_EXEC = 22003;
 // IDM_FILE = IDM + 1000 = 41000;  IDM_FILE_RENAME = 41000 + 17 = 41017.
 static const UINT IDM_FILE_RENAME = 41017;
 
+// IDM_FILE_SAVE / IDM_FILE_SAVEALL — WM_COMMAND IDs for File > Save and
+// File > Save All (IDM_FILE + 6 and IDM_FILE + 8).  Intercepted in
+// getMsgHookProc to temporarily clear FILE_ATTRIBUTE_READONLY before
+// Notepad++ writes to disk, allowing saves to succeed on read-only-flagged files.
+static const UINT IDM_FILE_SAVE    = 41006;   // IDM_FILE + 6
+static const UINT IDM_FILE_SAVEALL = 41008;   // IDM_FILE + 8
+
+// g_addReadOnly
+//   When true, every locked file also has FILE_ATTRIBUTE_READONLY set on disk.
+//   The original attribute state is saved in g_readOnlyOriginals and is
+//   restored exactly when the file is unlocked, locking is disabled,
+//   the file is closed, or Notepad++ shuts down.
+static bool g_addReadOnly = false;
+
+// g_readOnlyOriginals
+//   For each path where we applied FILE_ATTRIBUTE_READONLY, stores the
+//   DWORD file attributes that were present before we made the change.
+//   Used by restoreReadOnly() to put the attribute back exactly as found.
+static std::map<std::wstring, DWORD> g_readOnlyOriginals;
+
+// g_saveClearedPaths
+//   Paths whose FILE_ATTRIBUTE_READONLY was temporarily cleared so that
+//   Notepad++ can write the file.  Populated when IDM_FILE_SAVE or
+//   IDM_FILE_SAVEALL is dequeued (WH_GETMESSAGE).  Each path is removed
+//   in NPPN_FILESAVED after the write completes and r/o is re-applied.
+//   Any paths remaining after a failed save are swept up by the safety-net
+//   check in titleBarHookProc on the next WM_SETTEXT.
+static std::vector<std::wstring> g_saveClearedPaths;
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 2 – Internal file-lock helpers
@@ -267,6 +298,39 @@ static void releaseLock(HANDLE hFile)
         ::CloseHandle(hFile);
 }
 
+// ── applyReadOnly ─────────────────────────────────────────────────────────────
+//
+// Sets FILE_ATTRIBUTE_READONLY on the file at 'path', saving the original
+// DWORD attributes in g_readOnlyOriginals so they can be restored later.
+// No-op if the path is already tracked (avoids double-saving) or if the
+// file already has the read-only flag set (saves original without changing).
+// ─────────────────────────────────────────────────────────────────────────────
+static void applyReadOnly(const std::wstring& path)
+{
+    if (path.empty() || g_readOnlyOriginals.count(path))
+        return;
+    DWORD attrs = ::GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+        return;
+    g_readOnlyOriginals[path] = attrs;
+    if (!(attrs & FILE_ATTRIBUTE_READONLY))
+        ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
+}
+
+// ── restoreReadOnly ───────────────────────────────────────────────────────────
+//
+// Restores the file attributes saved by applyReadOnly(), removing the entry
+// from g_readOnlyOriginals.  No-op if the path is not tracked.
+// ─────────────────────────────────────────────────────────────────────────────
+static void restoreReadOnly(const std::wstring& path)
+{
+    auto it = g_readOnlyOriginals.find(path);
+    if (it == g_readOnlyOriginals.end())
+        return;
+    ::SetFileAttributesW(path.c_str(), it->second);
+    g_readOnlyOriginals.erase(it);
+}
+
 // ── lockPath ─────────────────────────────────────────────────────────────────
 //
 // Acquires an exclusive lock on the given file path and records it in g_lockMap.
@@ -285,6 +349,8 @@ static bool lockPath(const std::wstring& path)
         return false;
 
     g_lockMap[path] = h;
+    if (g_addReadOnly)
+        applyReadOnly(path);
     return true;
 }
 
@@ -298,6 +364,7 @@ static void unlockPath(const std::wstring& path)
     auto it = g_lockMap.find(path);
     if (it != g_lockMap.end())
     {
+        restoreReadOnly(path);
         releaseLock(it->second);
         g_lockMap.erase(it);
     }
@@ -311,8 +378,12 @@ static void unlockPath(const std::wstring& path)
 static void releaseAllLocks()
 {
     for (auto& kv : g_lockMap)
+    {
+        restoreReadOnly(kv.first);
         releaseLock(kv.second);
+    }
     g_lockMap.clear();
+    g_readOnlyOriginals.clear();  // safety net for any entries not in g_lockMap
 }
 
 
@@ -449,6 +520,46 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                 for (const auto& p : g_preRenameLockedPaths)
                     if (g_lockMap.count(p)) unlockPath(p);
             }
+
+            // Temporarily clear FILE_ATTRIBUTE_READONLY before Notepad++ writes
+            // to disk so the save succeeds.  r/o is re-applied in NPPN_FILESAVED.
+            if (g_addReadOnly && !g_readOnlyOriginals.empty())
+            {
+                if (cmdId == IDM_FILE_SAVE)
+                {
+                    std::wstring path = getCurrentFilePath();
+                    if (!path.empty() && g_readOnlyOriginals.count(path))
+                    {
+                        DWORD attrs = ::GetFileAttributesW(path.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES
+                            && (attrs & FILE_ATTRIBUTE_READONLY))
+                        {
+                            ::SetFileAttributesW(path.c_str(),
+                                attrs & ~FILE_ATTRIBUTE_READONLY);
+                            g_saveClearedPaths.push_back(path);
+                        }
+                    }
+                }
+                else if (cmdId == IDM_FILE_SAVEALL)
+                {
+                    // Save All iterates every modified buffer internally — clear
+                    // r/o for all tracked locked files up front.
+                    for (const auto& kv : g_readOnlyOriginals)
+                    {
+                        if (g_lockMap.count(kv.first))
+                        {
+                            DWORD attrs = ::GetFileAttributesW(kv.first.c_str());
+                            if (attrs != INVALID_FILE_ATTRIBUTES
+                                && (attrs & FILE_ATTRIBUTE_READONLY))
+                            {
+                                ::SetFileAttributesW(kv.first.c_str(),
+                                    attrs & ~FILE_ATTRIBUTE_READONLY);
+                                g_saveClearedPaths.push_back(kv.first);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     return ::CallNextHookEx(g_hGetMsgHook, nCode, wParam, lParam);
@@ -552,6 +663,23 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                 // Normal auto-lock on file open / tab switch.
                 lockPath(currentPath);
             }
+
+            // Safety net: if a save failed (NPPN_FILESAVED never fired),
+            // re-apply FILE_ATTRIBUTE_READONLY on the next title-bar update.
+            if (!g_saveClearedPaths.empty())
+            {
+                for (const auto& sp : g_saveClearedPaths)
+                {
+                    if (g_readOnlyOriginals.count(sp) && g_lockMap.count(sp))
+                    {
+                        DWORD cur = ::GetFileAttributesW(sp.c_str());
+                        if (cur != INVALID_FILE_ATTRIBUTES
+                            && !(cur & FILE_ATTRIBUTE_READONLY))
+                            ::SetFileAttributesW(sp.c_str(), cur | FILE_ATTRIBUTE_READONLY);
+                    }
+                }
+                g_saveClearedPaths.clear();
+            }
         }
 
         // NOTE: WM_ACTIVATE fires when the rename dialog closes, BEFORE
@@ -619,6 +747,16 @@ void commandMenuInit()
     funcItem[4]._pFunc      = showLockStatus;
     funcItem[4]._init2Check = false;
     funcItem[4]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[5]._itemName, _T(""));
+    funcItem[5]._pFunc      = nullptr;
+    funcItem[5]._init2Check = false;
+    funcItem[5]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[6]._itemName, _T("Add Read-only"));
+    funcItem[6]._pFunc      = toggleAddReadOnly;
+    funcItem[6]._init2Check = false;
+    funcItem[6]._pShKey     = nullptr;
 }
 
 // ── commandMenuCleanUp ───────────────────────────────────────────────────────
@@ -769,6 +907,8 @@ void lockCurrentFile()
     }
 
     g_lockMap[path] = h;
+    if (g_addReadOnly)
+        applyReadOnly(path);
 
     std::wstring msg = L"File locked successfully:\r\n" + path;
     ::MessageBoxW(g_nppData._nppHandle,
@@ -834,6 +974,63 @@ void showLockStatus()
 
     ::MessageBoxW(g_nppData._nppHandle,
         ss.str().c_str(), L"FileLock – Status", MB_OK | MB_ICONINFORMATION);
+}
+
+// ── toggleAddReadOnly ────────────────────────────────────────────────────────
+//
+// Flips g_addReadOnly and updates the menu check-mark.
+//
+// Enabling:
+//   Calls applyReadOnly() for every file currently in g_lockMap.
+//   From this point on, lockPath() will also set the read-only attribute.
+//
+// Disabling:
+//   Calls restoreReadOnly() for every path in g_readOnlyOriginals, restoring
+//   each file to the attribute state it had before the plugin touched it.
+// ─────────────────────────────────────────────────────────────────────────────
+void toggleAddReadOnly()
+{
+    g_addReadOnly = !g_addReadOnly;
+
+    HMENU hMenu = ::GetMenu(g_nppData._nppHandle);
+    if (hMenu != nullptr)
+    {
+        UINT checkFlag = g_addReadOnly ? MF_CHECKED : MF_UNCHECKED;
+        ::CheckMenuItem(hMenu,
+                        static_cast<UINT>(funcItem[6]._cmdID),
+                        MF_BYCOMMAND | checkFlag);
+    }
+
+    if (g_addReadOnly)
+    {
+        for (const auto& kv : g_lockMap)
+            applyReadOnly(kv.first);
+
+        ::MessageBox(
+            g_nppData._nppHandle,
+            _T("\"Add Read-only\" is now ENABLED.\r\n"
+               "Locked files have FILE_ATTRIBUTE_READONLY set on disk."),
+            _T("FileLock"),
+            MB_OK | MB_ICONINFORMATION
+        );
+    }
+    else
+    {
+        // Iterate over a copy because restoreReadOnly() modifies g_readOnlyOriginals.
+        std::vector<std::wstring> paths;
+        for (const auto& kv : g_readOnlyOriginals)
+            paths.push_back(kv.first);
+        for (const auto& p : paths)
+            restoreReadOnly(p);
+
+        ::MessageBox(
+            g_nppData._nppHandle,
+            _T("\"Add Read-only\" is now DISABLED.\r\n"
+               "File attributes have been restored."),
+            _T("FileLock"),
+            MB_OK | MB_ICONINFORMATION
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1009,6 +1206,23 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
                 }
                 // Normal save: path unchanged, existing handle remains valid.
             }
+
+            // Re-apply FILE_ATTRIBUTE_READONLY after the write (was temporarily
+            // cleared by getMsgHookProc so Notepad++ could open the file for
+            // writing).  lockPath() already set it for Save-As / first-save
+            // scenarios, so this is a no-op in those cases.
+            if (g_addReadOnly && !newPath.empty()
+                && g_lockMap.count(newPath) && g_readOnlyOriginals.count(newPath))
+            {
+                // Remove the path from the pending-restore list.
+                for (auto sc = g_saveClearedPaths.begin();
+                     sc != g_saveClearedPaths.end(); ++sc)
+                {
+                    if (*sc == newPath) { g_saveClearedPaths.erase(sc); break; }
+                }
+                ::SetFileAttributesW(newPath.c_str(),
+                    g_readOnlyOriginals[newPath] | FILE_ATTRIBUTE_READONLY);
+            }
             break;
         }
 
@@ -1079,11 +1293,12 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
             if (g_hGetMsgHook) { ::UnhookWindowsHookEx(g_hGetMsgHook); g_hGetMsgHook = nullptr; }
             if (g_hTitleHook)  { ::UnhookWindowsHookEx(g_hTitleHook);  g_hTitleHook  = nullptr; }
             commandMenuCleanUp();
-            releaseAllLocks();
+            releaseAllLocks();  // restores r/o attributes and clears g_readOnlyOriginals
             g_idToPath.clear();
             g_renamePendingLocks.clear();
             g_preRenameLockedPaths.clear();
             g_renameOpDispatched = false;
+            g_saveClearedPaths.clear();
             break;
 
         default:

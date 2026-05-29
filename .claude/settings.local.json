@@ -7,7 +7,10 @@
       "Bash(Get-ChildItem -Path \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin\" -Force)",
       "Bash(Select-Object Name, Mode)",
       "Bash(Format-Table -AutoSize)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(cmd /c \"\\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" && msbuild \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\vs.proj\\\\FileLockPlugin.vcxproj\\\\\" /p:Configuration=Release /p:Platform=x64 /m /nologo /verbosity:minimal 2>&1\")",
+      "Bash(cmd /c \"\\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" 2>&1 && msbuild \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\vs.proj\\\\FileLockPlugin.vcxproj\\\\\" /p:Configuration=Release /p:Platform=x64 /m /nologo /verbosity:minimal 2>&1\")",
+      "Bash(cmd /c \"\\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" && msbuild \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\vs.proj\\\\FileLockPlugin.vcxproj\\\\\" /p:Configuration=Release /p:Platform=x64 /m /nologo /verbosity:minimal > d:\\\\build_out.txt 2>&1 && type d:\\\\build_out.txt\")"
     ]
   }
 }
