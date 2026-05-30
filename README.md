@@ -301,6 +301,11 @@ a different location (use the path found in Step 1).
 
 Press **Ctrl+Shift+B** to run the default build task (x64 Release).
 
+> **Important:** `Ctrl+Shift+B` only runs the task marked `"isDefault": true`
+> in `tasks.json`.  Any other tasks in the file are ignored by this shortcut.
+> To run a non-default task, use **Terminal > Run Task…** and pick it from the
+> list.
+
 On success the terminal shows:
 
 ```text
@@ -310,6 +315,101 @@ Build succeeded.
 ```
 
 The compiled DLL is written to `vs.proj\x64\Release\FileLockPlugin.dll`.
+
+### Changing the default build to Win32 (32-bit)
+
+To make `Ctrl+Shift+B` build the 32-bit DLL instead, swap which task carries
+`"isDefault": true` in `tasks.json`:
+
+1. Change the x64 task's `group` from:
+
+   ```json
+   "group": {
+     "kind": "build",
+     "isDefault": true
+   }
+   ```
+
+   to just:
+
+   ```json
+   "group": "build"
+   ```
+
+2. Change the Win32 task's `group` from:
+
+   ```json
+   "group": "build"
+   ```
+
+   to:
+
+   ```json
+   "group": {
+     "kind": "build",
+     "isDefault": true
+   }
+   ```
+
+`Ctrl+Shift+B` now builds `vs.proj\Win32\Release\FileLockPlugin.dll`.
+
+### Building both platforms with one shortcut
+
+To build x64 and Win32 together, add a **compound task** that depends on both,
+and make that the default.  In `tasks.json`, add a third task and update the
+`group` values of the two existing tasks:
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build FileLockPlugin (x64 Release)",
+      "type": "shell",
+      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\" && msbuild vs.proj\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m",
+      "options": {
+        "shell": {
+          "executable": "cmd.exe",
+          "args": ["/C"]
+        }
+      },
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "detail": "Builds a 64-bit DLL for use with 64-bit Notepad++"
+    },
+    {
+      "label": "Build FileLockPlugin (Win32 Release)",
+      "type": "shell",
+      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars32.bat\" && msbuild vs.proj\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=Win32 /m",
+      "options": {
+        "shell": {
+          "executable": "cmd.exe",
+          "args": ["/C"]
+        }
+      },
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "detail": "Builds a 32-bit DLL for use with 32-bit Notepad++"
+    },
+    {
+      "label": "Build FileLockPlugin (All Platforms)",
+      "dependsOn": [
+        "Build FileLockPlugin (x64 Release)",
+        "Build FileLockPlugin (Win32 Release)"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}
+```
+
+The compound task has no `command` of its own — it simply lists the two build
+tasks in `dependsOn`.  VS Code runs both in parallel and reports success only
+when both complete.  `Ctrl+Shift+B` now triggers all platforms at once.
 
 ### Step 5 – IntelliSense configuration (optional but recommended)
 
@@ -408,6 +508,15 @@ msbuild vs.proj\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64
 > **Architecture must match:** A 64-bit Notepad++ installation requires a
 > **64-bit DLL** (built with Platform=x64).  A 32-bit installation requires a
 > **32-bit DLL** (Platform=Win32).  A mismatched DLL is silently ignored.
+>
+> **There is no single DLL that works for both architectures.**  A Windows DLL
+> is compiled to a specific CPU instruction set; the PE header contains a
+> `Machine` field that the Windows loader checks before mapping the image into
+> a process.  A 64-bit process can only load 64-bit DLLs, and a 32-bit process
+> can only load 32-bit DLLs.  Windows has no equivalent of macOS universal
+> ("fat") binaries.  The only partial exception is managed .NET assemblies
+> targeting `AnyCPU`, where the JIT compiles at runtime — this plugin is native
+> C++, so that does not apply.  Two separate builds are always required.
 
 ---
 
