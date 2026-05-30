@@ -64,6 +64,8 @@
 //  [4]   Show Lock Status             Message box listing all locked files
 //  [5]   (separator)                  Empty name → Notepad++ renders a line
 //  [6]   Add Read-only                Toggles FILE_ATTRIBUTE_READONLY on locked files
+//  [7]   (separator)                  Empty name → Notepad++ renders a line
+//  [8]   Remember Options             Persists g_lockingEnabled + g_addReadOnly to registry
 //
 // NOTEPAD++ MESSAGE USAGE
 // ───────────────────────
@@ -186,6 +188,13 @@ static const UINT IDM_FILE_RENAME_EXEC = 22003;
 // IDM_FILE = IDM + 1000 = 41000;  IDM_FILE_RENAME = 41000 + 17 = 41017.
 static const UINT IDM_FILE_RENAME = 41017;
 
+// WM_FL_LOCK_ALL — thread message posted by titleBarHookProc when a remembered
+// locking state is detected at startup.  Processed by getMsgHookProc in the
+// normal message loop so that enumerateOpenFilePaths() runs outside any hook
+// re-entrancy context (calling it directly from WH_CALLWNDPROCRET causes
+// Notepad++ to skip title-bar updates for all but the first tab switch).
+static const UINT WM_FL_LOCK_ALL = WM_APP + 1;
+
 // IDM_FILE_SAVE / IDM_FILE_SAVEALL — WM_COMMAND IDs for File > Save and
 // File > Save All (IDM_FILE + 6 and IDM_FILE + 8).  Intercepted in
 // getMsgHookProc to temporarily clear FILE_ATTRIBUTE_READONLY before
@@ -199,6 +208,22 @@ static const UINT IDM_FILE_SAVEALL = 41008;   // IDM_FILE + 8
 //   restored exactly when the file is unlocked, locking is disabled,
 //   the file is closed, or Notepad++ shuts down.
 static bool g_addReadOnly = false;
+
+// g_rememberOptions
+//   When true, g_lockingEnabled and g_addReadOnly are persisted to the registry
+//   whenever they change, and are restored at startup.
+static bool g_rememberOptions = false;
+
+// g_pendingInitialLock
+//   Set by loadSettings() when g_lockingEnabled is restored as true.
+//   The first WM_SETTEXT in titleBarHookProc after startup clears this flag and
+//   locks all already-open files, covering session-restored tabs that were loaded
+//   before setInfo() ran (i.e., before NPPN_BUFFERACTIVATED could act on the
+//   restored g_lockingEnabled value).
+static bool g_pendingInitialLock = false;
+
+// Registry key used to persist plugin option states.
+static const wchar_t* REG_KEY = L"Software\\FileLockPlugin";
 
 // g_readOnlyOriginals
 //   For each path where we applied FILE_ATTRIBUTE_READONLY, stores the
@@ -217,7 +242,62 @@ static std::vector<std::wstring> g_saveClearedPaths;
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 2 – Internal file-lock helpers
+// SECTION 2 – Settings persistence (registry)
+// ═══════════════════════════════════════════════════════════════════════════
+
+static void saveSettings()
+{
+    HKEY hKey = nullptr;
+    if (::RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, nullptr,
+                          REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr,
+                          &hKey, nullptr) != ERROR_SUCCESS)
+        return;
+    DWORD v;
+    v = g_rememberOptions ? 1 : 0;
+    ::RegSetValueExW(hKey, L"RememberOptions", 0, REG_DWORD,
+                     reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    v = g_lockingEnabled ? 1 : 0;
+    ::RegSetValueExW(hKey, L"LockingEnabled", 0, REG_DWORD,
+                     reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    v = g_addReadOnly ? 1 : 0;
+    ::RegSetValueExW(hKey, L"AddReadOnly", 0, REG_DWORD,
+                     reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    ::RegCloseKey(hKey);
+}
+
+static void loadSettings()
+{
+    HKEY hKey = nullptr;
+    if (::RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_QUERY_VALUE,
+                        &hKey) != ERROR_SUCCESS)
+        return;
+    DWORD type = 0, size = sizeof(DWORD), v = 0;
+    if (::RegQueryValueExW(hKey, L"RememberOptions", nullptr, &type,
+                           reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
+        && type == REG_DWORD)
+        g_rememberOptions = (v != 0);
+    if (g_rememberOptions)
+    {
+        v = 0; size = sizeof(DWORD);
+        if (::RegQueryValueExW(hKey, L"LockingEnabled", nullptr, &type,
+                               reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
+            && type == REG_DWORD)
+        {
+            g_lockingEnabled = (v != 0);
+            if (g_lockingEnabled)
+                g_pendingInitialLock = true;
+        }
+        v = 0; size = sizeof(DWORD);
+        if (::RegQueryValueExW(hKey, L"AddReadOnly", nullptr, &type,
+                               reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
+            && type == REG_DWORD)
+            g_addReadOnly = (v != 0);
+    }
+    ::RegCloseKey(hKey);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3 – Internal file-lock helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── getCurrentFilePath ───────────────────────────────────────────────────────
@@ -493,6 +573,21 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode == HC_ACTION && wParam == PM_REMOVE)
     {
         const MSG* msg = reinterpret_cast<const MSG*>(lParam);
+
+        // Deferred startup lock-all: posted as a thread message (hwnd == nullptr)
+        // so that enumerateOpenFilePaths() runs in the normal message loop context
+        // rather than from within the WH_CALLWNDPROCRET hook proc where Notepad++'s
+        // re-entrancy guard prevents title-bar updates during tab cycling.
+        if (msg->hwnd == nullptr && msg->message == WM_FL_LOCK_ALL)
+        {
+            if (g_lockingEnabled)
+            {
+                std::vector<std::wstring> allPaths = enumerateOpenFilePaths();
+                for (const auto& p : allPaths)
+                    lockPath(p);
+            }
+        }
+
         if (msg->message == WM_COMMAND)
         {
             UINT cmdId = LOWORD(msg->wParam);
@@ -657,6 +752,16 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                 // else: IDM_FILE_RENAME_EXEC hasn't fired yet (dialog still open
                 // or WM_SETTEXT is a title refresh mid-dialog).  Wait.
             }
+            else if (g_pendingInitialLock && g_lockingEnabled)
+            {
+                // Defer the lock-all to the normal message loop via a posted thread
+                // message.  Calling enumerateOpenFilePaths() directly from inside a
+                // WH_CALLWNDPROCRET hook proc causes Notepad++ to skip title-bar
+                // updates for all but the first TCN_SELCHANGE (re-entrancy guard),
+                // so only tab 0 and the restored tab would be enumerated correctly.
+                g_pendingInitialLock = false;
+                ::PostThreadMessageW(::GetCurrentThreadId(), WM_FL_LOCK_ALL, 0, 0);
+            }
             else if (g_lockingEnabled && !currentPath.empty()
                      && !g_lockMap.count(currentPath))
             {
@@ -691,7 +796,7 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 3 – Plugin lifecycle (called from DllMain and exported functions)
+// SECTION 4 – Plugin lifecycle (called from DllMain and exported functions)
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── pluginInit ───────────────────────────────────────────────────────────────
@@ -725,7 +830,7 @@ void commandMenuInit()
 {
     ::lstrcpy(funcItem[0]._itemName, _T("Toggle File Locking (On/Off)"));
     funcItem[0]._pFunc      = toggleLocking;
-    funcItem[0]._init2Check = false;
+    funcItem[0]._init2Check = g_lockingEnabled;
     funcItem[0]._pShKey     = nullptr;
 
     ::lstrcpy(funcItem[1]._itemName, _T(""));
@@ -755,8 +860,18 @@ void commandMenuInit()
 
     ::lstrcpy(funcItem[6]._itemName, _T("Add Read-only"));
     funcItem[6]._pFunc      = toggleAddReadOnly;
-    funcItem[6]._init2Check = false;
+    funcItem[6]._init2Check = g_addReadOnly;
     funcItem[6]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[7]._itemName, _T(""));
+    funcItem[7]._pFunc      = nullptr;
+    funcItem[7]._init2Check = false;
+    funcItem[7]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[8]._itemName, _T("Remember Options"));
+    funcItem[8]._pFunc      = toggleRememberOptions;
+    funcItem[8]._init2Check = g_rememberOptions;
+    funcItem[8]._pShKey     = nullptr;
 }
 
 // ── commandMenuCleanUp ───────────────────────────────────────────────────────
@@ -769,7 +884,7 @@ void commandMenuCleanUp()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 4 – Menu-item callback implementations  (STEP 4)
+// SECTION 5 – Menu-item callback implementations  (STEP 4)
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── toggleLocking ────────────────────────────────────────────────────────────
@@ -799,6 +914,9 @@ void toggleLocking()
                         static_cast<UINT>(funcItem[0]._cmdID),
                         MF_BYCOMMAND | checkFlag);
     }
+
+    if (g_rememberOptions)
+        saveSettings();
 
     if (!g_lockingEnabled)
     {
@@ -1001,6 +1119,9 @@ void toggleAddReadOnly()
                         MF_BYCOMMAND | checkFlag);
     }
 
+    if (g_rememberOptions)
+        saveSettings();
+
     if (g_addReadOnly)
     {
         for (const auto& kv : g_lockMap)
@@ -1033,8 +1154,31 @@ void toggleAddReadOnly()
     }
 }
 
+// ── toggleRememberOptions ────────────────────────────────────────────────────
+//
+// Flips g_rememberOptions and persists the current option state to the registry.
+// When enabled, any subsequent toggle of g_lockingEnabled or g_addReadOnly also
+// writes to the registry.  The saved state is restored at startup via loadSettings().
+// When disabled, RememberOptions=0 is written so the next startup uses defaults.
+// ─────────────────────────────────────────────────────────────────────────────
+void toggleRememberOptions()
+{
+    g_rememberOptions = !g_rememberOptions;
+
+    HMENU hMenu = ::GetMenu(g_nppData._nppHandle);
+    if (hMenu != nullptr)
+    {
+        UINT checkFlag = g_rememberOptions ? MF_CHECKED : MF_UNCHECKED;
+        ::CheckMenuItem(hMenu,
+                        static_cast<UINT>(funcItem[8]._cmdID),
+                        MF_BYCOMMAND | checkFlag);
+    }
+
+    saveSettings();
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 5 – Mandatory exported Notepad++ plugin interface
+// SECTION 6 – Mandatory exported Notepad++ plugin interface
 // ═══════════════════════════════════════════════════════════════════════════
 
 extern "C" __declspec(dllexport) BOOL isUnicode()
@@ -1045,6 +1189,7 @@ extern "C" __declspec(dllexport) BOOL isUnicode()
 extern "C" __declspec(dllexport) void setInfo(NppData notepadPlusData)
 {
     g_nppData = notepadPlusData;
+    loadSettings();       // must precede commandMenuInit() so _init2Check reflects saved state
     commandMenuInit();
 
     // Install both message hooks here rather than in NPPN_READY (which never
@@ -1299,6 +1444,7 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
             g_preRenameLockedPaths.clear();
             g_renameOpDispatched = false;
             g_saveClearedPaths.clear();
+            g_pendingInitialLock = false;
             break;
 
         default:
@@ -1315,7 +1461,7 @@ extern "C" __declspec(dllexport) LRESULT messageProc(UINT /*msg*/,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 6 – DLL entry point
+// SECTION 7 – DLL entry point
 // ═══════════════════════════════════════════════════════════════════════════
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID /*lpReserved*/)

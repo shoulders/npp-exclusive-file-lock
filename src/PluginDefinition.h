@@ -52,8 +52,10 @@ const TCHAR PLUGIN_NAME[] = _T("ExclusiveFileLock");
 //   [4] Show Lock Status               ← show all currently-locked files
 //   [5] ---                            ← separator
 //   [6] Add Read-only                  ← set FILE_ATTRIBUTE_READONLY on locked files
+//   [7] ---                            ← separator
+//   [8] Remember Options               ← persist toggle states across restarts
 //
-const int nbFunc = 7;
+const int nbFunc = 9;
 
 //--------------------------------------------//
 //-- STEP 3. CUSTOMIZE YOUR PLUGIN COMMANDS --//
@@ -77,6 +79,9 @@ void showLockStatus();
 
 // Toggles the "add read-only attribute" option on locked files.
 void toggleAddReadOnly();
+
+// Toggles persistent storage of plugin option states across restarts.
+void toggleRememberOptions();
 
 //----------------------------------------------//
 //-- STEP 4. DEFINE YOUR ASSOCIATED FUNCTIONS --//
