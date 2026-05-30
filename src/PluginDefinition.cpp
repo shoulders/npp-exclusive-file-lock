@@ -87,6 +87,7 @@
 
 // Standard C++ library
 #include <map>          // std::map – path→HANDLE lock map and id→path tracking
+#include <set>          // std::set – foreign-open path warning suppression
 #include <string>       // std::wstring – wide-character file paths
 #include <sstream>      // std::wstringstream – building multi-line messages
 #include <vector>       // std::vector – temporary collections
@@ -94,6 +95,10 @@
 
 // Windows extended controls (TCM_* tab-control messages, TCN_SELCHANGE)
 #include <commctrl.h>
+
+// Restart Manager — enumerates processes that have a file open
+#include <restartmanager.h>
+#pragma comment(lib, "rstrtmgr.lib")
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 1 – Plugin-wide state
@@ -239,6 +244,14 @@ static std::map<std::wstring, DWORD> g_readOnlyOriginals;
 //   Any paths remaining after a failed save are swept up by the safety-net
 //   check in titleBarHookProc on the next WM_SETTEXT.
 static std::vector<std::wstring> g_saveClearedPaths;
+
+// g_foreignOpenPaths
+//   Paths for which a foreign (non-Notepad++) process was detected holding
+//   the file open.  Prevents the warning popup from repeating on every tab
+//   switch.  The RM check is still re-run each time; once the other process
+//   closes the file, lockPath() proceeds normally and removes the entry.
+//   Cleared in releaseAllLocks() and when a file's tab is closed.
+static std::set<std::wstring> g_foreignOpenPaths;
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -411,6 +424,82 @@ static void restoreReadOnly(const std::wstring& path)
     g_readOnlyOriginals.erase(it);
 }
 
+// ── getFileOwnerProcessNames ──────────────────────────────────────────────────
+//
+// Uses the Windows Restart Manager API to enumerate every process (other than
+// Notepad++ itself) that currently has 'path' open.  Returns their EXE
+// basenames (e.g. L"notepad.exe"), falling back to the RM friendly app name
+// if the process handle cannot be opened.
+//
+// The Restart Manager is appropriate here: it is lightweight, requires no
+// elevated access, and correctly detects modern applications that hold their
+// file handles open during editing (Windows 11 Notepad, Word, VS Code, etc.).
+//
+// Limitation: applications that open-read-close (i.e. read file content into
+// memory and then release the handle) are not detectable by any handle-based
+// API.  See README § "Detecting concurrent file access" for details.
+// ─────────────────────────────────────────────────────────────────────────────
+static std::vector<std::wstring> getFileOwnerProcessNames(const std::wstring& path)
+{
+    std::vector<std::wstring> result;
+    if (path.empty())
+        return result;
+
+    DWORD dwSession = 0;
+    WCHAR szKey[CCH_RM_SESSION_KEY + 1] = {};
+    if (::RmStartSession(&dwSession, 0, szKey) != ERROR_SUCCESS)
+        return result;
+
+    PCWSTR pszFile = path.c_str();
+    if (::RmRegisterResources(dwSession, 1, &pszFile, 0, nullptr, 0, nullptr)
+        == ERROR_SUCCESS)
+    {
+        DWORD dwReason = 0;
+        UINT  nNeeded  = 0, nInfo = 0;
+        DWORD err = ::RmGetList(dwSession, &nNeeded, &nInfo, nullptr, &dwReason);
+        if (err == ERROR_MORE_DATA && nNeeded > 0)
+        {
+            std::vector<RM_PROCESS_INFO> rgpi(nNeeded);
+            nInfo = nNeeded;
+            err = ::RmGetList(dwSession, &nNeeded, &nInfo, rgpi.data(), &dwReason);
+            if (err == ERROR_SUCCESS)
+            {
+                DWORD currentPid = ::GetCurrentProcessId();
+                for (UINT i = 0; i < nInfo; i++)
+                {
+                    if (rgpi[i].Process.dwProcessId == currentPid)
+                        continue;
+
+                    std::wstring name;
+                    HANDLE hProc = ::OpenProcess(
+                        PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                        rgpi[i].Process.dwProcessId);
+                    if (hProc)
+                    {
+                        wchar_t exePath[MAX_PATH] = {};
+                        DWORD   len = MAX_PATH;
+                        if (::QueryFullProcessImageNameW(hProc, 0, exePath, &len))
+                        {
+                            std::wstring full(exePath);
+                            size_t pos = full.rfind(L'\\');
+                            name = (pos != std::wstring::npos)
+                                   ? full.substr(pos + 1) : full;
+                        }
+                        ::CloseHandle(hProc);
+                    }
+                    if (name.empty())
+                        name = rgpi[i].strAppName;  // friendly name fallback
+                    if (!name.empty())
+                        result.push_back(name);
+                }
+            }
+        }
+    }
+
+    ::RmEndSession(dwSession);
+    return result;
+}
+
 // ── lockPath ─────────────────────────────────────────────────────────────────
 //
 // Acquires an exclusive lock on the given file path and records it in g_lockMap.
@@ -423,6 +512,34 @@ static bool lockPath(const std::wstring& path)
         return false;
     if (g_lockMap.count(path))
         return true;    // already locked — nothing to do
+
+    // Check whether any foreign process currently has this file open.
+    // Re-run every time so we detect when the other app has closed the file.
+    std::vector<std::wstring> owners = getFileOwnerProcessNames(path);
+    if (!owners.empty())
+    {
+        if (!g_foreignOpenPaths.count(path))
+        {
+            // Warn once per conflict episode; suppress until the other app closes.
+            g_foreignOpenPaths.insert(path);
+            std::wstringstream ss;
+            ss << L"This file is already open in another application.\r\n"
+                  L"FileLock will not lock it or set it read-only.\r\n\r\n"
+               << path << L"\r\n\r\n"
+                  L"Opened by:";
+            for (const auto& n : owners)
+                ss << L"\r\n  \x2022 " << n;
+            ss << L"\r\n\r\n"
+                  L"Close the other application and switch back to this tab\r\n"
+                  L"to allow FileLock to protect the file.";
+            ::MessageBoxW(g_nppData._nppHandle, ss.str().c_str(),
+                          L"FileLock \x2013 File In Use", MB_OK | MB_ICONWARNING);
+        }
+        return false;
+    }
+
+    // Other app has closed (or was never there) — clear any stale warning entry.
+    g_foreignOpenPaths.erase(path);
 
     HANDLE h = acquireLock(path);
     if (h == INVALID_HANDLE_VALUE)
@@ -464,6 +581,7 @@ static void releaseAllLocks()
     }
     g_lockMap.clear();
     g_readOnlyOriginals.clear();  // safety net for any entries not in g_lockMap
+    g_foreignOpenPaths.clear();
 }
 
 
@@ -695,7 +813,8 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                 // whose files are no longer open.
                 // NPPN_FILEBEFORECLOSE does not fire in this build, so this
                 // is the only reliable close-detection mechanism.
-                if (currentCount < g_prevTabCount && !g_lockMap.empty())
+                if (currentCount < g_prevTabCount
+                    && (!g_lockMap.empty() || !g_foreignOpenPaths.empty()))
                 {
                     std::vector<std::wstring> openPaths = enumerateOpenFilePaths();
                     std::vector<std::wstring> toUnlock;
@@ -707,8 +826,18 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                         if (!found)
                             toUnlock.push_back(kv.first);
                     }
-                    for (const auto& path : toUnlock)
-                        unlockPath(path);
+                    for (const auto& p : toUnlock)
+                        unlockPath(p);
+
+                    // Remove closed-file entries from the foreign-open warning set.
+                    for (auto it = g_foreignOpenPaths.begin();
+                         it != g_foreignOpenPaths.end(); )
+                    {
+                        bool found = false;
+                        for (const auto& op : openPaths)
+                            if (op == *it) { found = true; break; }
+                        it = found ? ++it : g_foreignOpenPaths.erase(it);
+                    }
                 }
                 g_prevTabCount = currentCount;
             }
@@ -1002,6 +1131,27 @@ void lockCurrentFile()
         ::MessageBoxW(g_nppData._nppHandle,
             msg.c_str(), L"FileLock", MB_OK | MB_ICONINFORMATION);
         return;
+    }
+
+    // Always do a fresh check on manual lock so the user sees current state.
+    {
+        std::vector<std::wstring> owners = getFileOwnerProcessNames(path);
+        if (!owners.empty())
+        {
+            std::wstringstream ss;
+            ss << L"Cannot lock — this file is already open in another application:\r\n\r\n"
+               << path << L"\r\n\r\n"
+                  L"Opened by:";
+            for (const auto& n : owners)
+                ss << L"\r\n  \x2022 " << n;
+            ss << L"\r\n\r\n"
+                  L"Close the other application first, then try again.";
+            ::MessageBoxW(g_nppData._nppHandle, ss.str().c_str(),
+                          L"FileLock \x2013 File In Use", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        // Other app closed — clear the suppression flag so auto-lock resumes.
+        g_foreignOpenPaths.erase(path);
     }
 
     ::SetLastError(0);
@@ -1444,6 +1594,7 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
             g_preRenameLockedPaths.clear();
             g_renameOpDispatched = false;
             g_saveClearedPaths.clear();
+            g_foreignOpenPaths.clear();
             g_pendingInitialLock = false;
             break;
 

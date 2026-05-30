@@ -51,7 +51,7 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 ## Menu items
 
 | Menu item | What it does |
-|---|---|
+| --- | --- |
 | **Toggle File Locking (On/Off)** | Master switch. Shows a ✔ check-mark when enabled. Turning OFF releases all currently held locks immediately. |
 | *(separator)* | — |
 | **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
@@ -65,7 +65,7 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 ## Automatic behaviour
 
 | Notepad++ event | Plugin response |
-|---|---|
+| --- | --- |
 | File opened | If locking is **ON**, the new file is locked immediately. |
 | File saved (including Save-As) | Lock is re-acquired on the new path so the handle always matches the on-disk file. |
 | File renamed in Notepad++ | `NPPN_FILEBEFORERENAME`: lock released. `NPPN_FILERENAMED`: lock re-acquired on new path. `NPPN_FILERENAMECANCEL`: lock restored on original path. |
@@ -80,7 +80,9 @@ Some applications ignore Win32 exclusive file locks entirely and will overwrite
 a locked file without any error.  The most common example is **Windows
 Notepad** (`notepad.exe`): it opens files with permissive share flags, so it
 does not receive `ERROR_SHARING_VIOLATION` and can silently overwrite a file
-that this plugin has locked.
+that this plugin has locked.  Notepad also does not place any file lock of its
+own on files it opens, so other applications (including this plugin) have no
+way to tell from the file itself that Notepad has it open.
 
 Enabling **Add Read-only** adds a second layer of protection.  When the option
 is on, the plugin calls `SetFileAttributes` to add `FILE_ATTRIBUTE_READONLY` to
@@ -91,7 +93,7 @@ overwriting a read-only file.
 ### What changes when Add Read-only is on
 
 | Event | Behaviour |
-|---|---|
+| --- | --- |
 | File locked (auto or manual) | `FILE_ATTRIBUTE_READONLY` is set.  The original attribute value is saved internally. |
 | File saved from Notepad++ | The flag is **temporarily cleared** just before Notepad++ writes, then **restored immediately** after the save completes — so saving works normally from Notepad++ while the file remains read-only to everything else. |
 | File unlocked (any reason) | The original attribute value is restored exactly as it was before the plugin touched it. |
@@ -111,12 +113,62 @@ overwriting a read-only file.
 
 ---
 
+## Detecting concurrent file access
+
+When locking is enabled and a file is opened in Notepad++, the plugin checks
+whether another application already has that file open before acquiring the
+lock.  If one is found, the plugin:
+
+- **does not** lock the file,
+- **does not** set `FILE_ATTRIBUTE_READONLY`, and
+- shows a warning message box naming the other application.
+
+The check is repeated each time you switch back to that tab.  Once the other
+application closes the file, the next tab switch locks it normally.
+
+### How detection works
+
+The plugin uses the **Windows Restart Manager API** (`RmGetList`), the same
+mechanism Windows uses to display "this file is open in another program" dialogs
+during software installation.  It requires no elevated privileges, does not
+enumerate system handles, and does not open or duplicate handles from other
+processes.
+
+It reliably detects any application that **currently holds an open file handle**:
+Microsoft Word, VS Code, most professional editors, and any other tool that keeps
+its handle open while editing.
+
+### Detection limitation — open-read-close applications
+
+The Restart Manager, and every other unprivileged Windows API, can only detect a
+process that currently **holds an open kernel handle** to the file.  Some
+applications open a file, read its content into memory, **immediately close the
+handle**, and then display the data without retaining any OS-visible reference.
+Once the handle is closed, Windows retains no record that the process ever opened
+the file — there is nothing for any API to report.
+
+**Windows 11 Notepad** (`notepad.exe`) behaves this way.  It releases its file
+handle after reading, so the plugin has no means to detect it.  This is a
+fundamental OS constraint, not a limitation of the implementation; it cannot be
+worked around without a kernel-mode file-system filter driver, which is outside
+the scope of a Notepad++ plugin.
+
+The alternatives considered and rejected:
+
+| Alternative | Why rejected |
+| --- | --- |
+| `NtQuerySystemInformation` + `DuplicateHandle` | Requires `PROCESS_DUP_HANDLE` on every running process — a significant security capability; also expensive (dumps entire kernel handle table) |
+| Scan window titles for the filename | Unreliable — any window with the same filename in its title triggers a false positive |
+| Kernel-mode filter driver | Entirely out of scope for a Notepad++ plugin |
+
+---
+
 ## Project structure
 
 This plugin follows the layout of the official Notepad++ plugin template
-(https://github.com/npp-plugins/plugintemplate):
+(<https://github.com/npp-plugins/plugintemplate>):
 
-```
+```text
 FileLockPlugin/
 ├── src/
 │   ├── Sci_Position.h          ← Scintilla position type (Sci_Position, Sci_Line)
@@ -134,7 +186,7 @@ FileLockPlugin/
 ### Header file roles
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `Sci_Position.h` | Defines `Sci_Position` (ptrdiff_t alias). Required by `Scintilla.h`. |
 | `Scintilla.h` | Defines `uptr_t`, `sptr_t`, and `SCNotification`. The standard Scintilla types used throughout the Notepad++ plugin API. |
 | `Notepad_plus_msgs.h` | Defines all `NPPM_*` SendMessage codes and `NPPN_*` notification codes. |
@@ -145,9 +197,10 @@ FileLockPlugin/
 > **Note on header files:** The official Notepad++ documentation recommends
 > always using the up-to-date versions of `Scintilla.h`, `Sci_Position.h`, and
 > `Notepad_plus_msgs.h` from the Notepad++ repository:
-> - https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/scintilla/include/Scintilla.h
-> - https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/scintilla/include/Sci_Position.h
-> - https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/PowerEditor/src/MISC/PluginsManager/Notepad_plus_msgs.h
+>
+> - <https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/scintilla/include/Scintilla.h>
+> - <https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/scintilla/include/Sci_Position.h>
+> - <https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/PowerEditor/src/MISC/PluginsManager/Notepad_plus_msgs.h>
 
 ---
 
@@ -156,8 +209,8 @@ FileLockPlugin/
 ### Requirements
 
 | Requirement | Notes |
-|---|---|
-| **Build Tools for Visual Studio 2026** | Free — provides the MSVC compiler. Download from https://visualstudio.microsoft.com/downloads/ |
+| --- | --- |
+| **Build Tools for Visual Studio 2026** | Free — provides the MSVC compiler. Download from <https://visualstudio.microsoft.com/downloads/> |
 | Workload: **Desktop development with C++** | Select this in the installer |
 | Component: **MSVC v145 C++ x64/x86 build tools** | The compiler — must be ticked |
 | Component: **Windows 11 SDK (10.0.28000 or later)** | Must be ticked |
@@ -176,7 +229,7 @@ Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" `
 This tells you the exact path to `vcvars64.bat`.  Common locations:
 
 | Installation | Path |
-|---|---|
+| --- | --- |
 | Build Tools 2026 (x86 install dir) | `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat` |
 | Build Tools 2026 (x64 install dir) | `C:\Program Files\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat` |
 | Community / Professional 2026 | `C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat` |
@@ -238,7 +291,7 @@ a different location (use the path found in Step 1).
 > `&&` as a command separator.  Setting `shell.executable` to `cmd.exe` for
 > the task ensures it always runs in `cmd.exe` regardless of your default
 > terminal, keeping the `&&` syntax valid.
-
+>
 > **Why is the whole command one string?**
 > When `cmd.exe /C` runs a command that contains a quoted path, the entire
 > argument after `/C` must be a single string.  Splitting it into an `args`
@@ -250,7 +303,7 @@ Press **Ctrl+Shift+B** to run the default build task (x64 Release).
 
 On success the terminal shows:
 
-```
+```text
 Build succeeded.
     0 Warning(s)
     0 Error(s)
@@ -296,7 +349,7 @@ includes correctly and shows accurate error highlighting:
 
 ### Recommended folder layout after VS Code setup
 
-```
+```text
 FileLockPlugin/
 ├── .vscode/
 │   ├── tasks.json                   ← build tasks (required)
@@ -423,7 +476,7 @@ at all. The plugin therefore bypasses almost the entire standard API and relies
 on lower-level Windows mechanisms instead:
 
 | Concern | Approach |
-|---|---|
+| --- | --- |
 | **Path resolution** | Title-bar parse via `GetWindowTextW` — the only reliable source of the active file's path |
 | **Lock identity** | `g_lockMap` keyed by file path, not buffer ID (`NPPM_GETCURRENTBUFFERID` returns the same value for every tab) |
 | **Hook installation** | `setInfo()` — `NPPN_READY` never fires in this build |
