@@ -92,9 +92,12 @@
 #include <sstream>      // std::wstringstream – building multi-line messages
 #include <vector>       // std::vector – temporary collections
 #include <tchar.h>      // _T() macro – literal portability (Unicode / ANSI)
+#include <cstdarg>      // va_list – diagnostic helper
 
 // Windows extended controls (TCM_* tab-control messages, TCN_SELCHANGE)
+// SetWindowSubclass / RemoveWindowSubclass / DefSubclassProc (comctl32 v6)
 #include <commctrl.h>
+#pragma comment(lib, "comctl32.lib")
 
 // Restart Manager — enumerates processes that have a file open
 #include <restartmanager.h>
@@ -137,6 +140,16 @@ static std::map<uptr_t, std::wstring> g_idToPath;
 //   title-bar update — so getCurrentFilePath() reliably returns the new path.
 //   Used to auto-lock files as they become active while g_lockingEnabled is true.
 static HHOOK g_hTitleHook = nullptr;
+
+// g_hCmdHook
+//   WH_CALLWNDPROC hook installed on Notepad++'s UI thread.
+//   Fires BEFORE a sent message is processed by its destination window.
+//   Used to clear FILE_ATTRIBUTE_READONLY on locked files BEFORE Notepad++
+//   processes WM_ACTIVATE (WA_ACTIVE) — so when Notepad++ reads file attributes
+//   during activation it sees the files as writable and never sets pdoc->readonly.
+static HHOOK g_hCmdHook = nullptr;
+
+
 
 // g_enumerating
 //   Set to true while enumerateOpenFilePaths() cycles through tabs.
@@ -200,12 +213,61 @@ static const UINT IDM_FILE_RENAME = 41017;
 // Notepad++ to skip title-bar updates for all but the first tab switch).
 static const UINT WM_FL_LOCK_ALL = WM_APP + 1;
 
+// SCI_SETREADONLY / SCI_GETREADONLY — not in the trimmed plugin-template Scintilla.h.
+static const UINT SCI_SETREADONLY = 2072;
+static const UINT SCI_GETREADONLY = 2088;
+
+// g_log — in-memory event log shown by Show Lock Status.
+// Accumulates timestamped entries from key points in the hook chain.
+// Capped at 60 lines so the dialog stays readable.
+static std::vector<std::wstring> g_log;
+static DWORD g_logBase = 0;   // GetTickCount() at first log entry
+
+static void log(const wchar_t* fmt, ...)
+{
+    if (g_log.size() >= 60) return;
+
+    wchar_t buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    ::_vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, ap);
+    va_end(ap);
+
+    DWORD now = ::GetTickCount();
+    if (g_logBase == 0) g_logBase = now;
+
+    wchar_t entry[600];
+    ::_snwprintf_s(entry, _countof(entry), _TRUNCATE,
+                   L"[+%4lums] %s", (unsigned long)(now - g_logBase), buf);
+    g_log.push_back(entry);
+    ::OutputDebugStringW(entry);
+}
+
+// dbg — unchanged, still sends to OutputDebugStringW.
+static void dbg(const wchar_t* fmt, ...)
+{
+    wchar_t buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    ::_vsnwprintf_s(buf, _countof(buf), _TRUNCATE, fmt, ap);
+    va_end(ap);
+    ::OutputDebugStringW(buf);
+}
+
 // IDM_FILE_SAVE / IDM_FILE_SAVEALL — WM_COMMAND IDs for File > Save and
 // File > Save All (IDM_FILE + 6 and IDM_FILE + 8).  Intercepted in
 // getMsgHookProc to temporarily clear FILE_ATTRIBUTE_READONLY before
 // Notepad++ writes to disk, allowing saves to succeed on read-only-flagged files.
 static const UINT IDM_FILE_SAVE    = 41006;   // IDM_FILE + 6
 static const UINT IDM_FILE_SAVEALL = 41008;   // IDM_FILE + 8
+
+// NPPM_SETBUFFERREADONLY — sets a specific buffer's read-only state via
+// Notepad++'s internal path (calls buf->setReadOnly() which sets both
+// buffer._isReadOnly AND pdoc->SetReadOnly()).
+// Value: NOTEPADPLUS_USER + 106 = (WM_USER + 0x0400) + 106 = 2048 + 106 = 2154.
+// wParam = BufferID (from NPPN_ notification nmhdr.idFrom)
+// lParam = FALSE to make writable, TRUE to make read-only.
+static const UINT NPPM_SETBUFFERREADONLY = 2154;
 
 // g_addReadOnly
 //   When true, every locked file also has FILE_ATTRIBUTE_READONLY set on disk.
@@ -227,6 +289,18 @@ static bool g_rememberOptions = false;
 //   restored g_lockingEnabled value).
 static bool g_pendingInitialLock = false;
 
+// g_nppFocused — true while Notepad++ is the foreground window.
+// While focused, FILE_ATTRIBUTE_READONLY is NOT set on managed files so
+// monitoring never fires the SET event → buffer._isReadOnly stays false →
+// all tab switches keep pdoc false → all files remain editable.
+// FILE_ATTRIBUTE_READONLY is applied only when Notepad++ loses focus.
+static bool g_nppFocused = true;
+
+// g_pendingBufferId — buffer ID saved from NPPN_BUFFERACTIVATED before the
+// title bar updates.  Correlated with the path in the next WM_SETTEXT so
+// that g_idToPath always has an entry for NPPM_SETBUFFERREADONLY lookups.
+static uptr_t g_pendingBufferId = 0;
+
 // Registry key used to persist plugin option states.
 static const wchar_t* REG_KEY = L"Software\\FileLockPlugin";
 
@@ -235,6 +309,16 @@ static const wchar_t* REG_KEY = L"Software\\FileLockPlugin";
 //   DWORD file attributes that were present before we made the change.
 //   Used by restoreReadOnly() to put the attribute back exactly as found.
 static std::map<std::wstring, DWORD> g_readOnlyOriginals;
+
+// g_pendingRestorePaths
+//   Paths where WE set FILE_ATTRIBUTE_READONLY in the current session (i.e.,
+//   the original file was writable).  Persisted to the registry under
+//   "PendingRestore" so that if Notepad++ crashes without running cleanup,
+//   the next startup can clear the attribute before Notepad++ opens the files.
+//   Without this, a crash leaves files permanently stuck as read-only:
+//   applyReadOnly() then sees the flag already set, records "originally read-only",
+//   and restoreReadOnly() restores that same flag — a loop that never breaks.
+static std::set<std::wstring> g_pendingRestorePaths;
 
 // g_saveClearedPaths
 //   Paths whose FILE_ATTRIBUTE_READONLY was temporarily cleared so that
@@ -306,6 +390,85 @@ static void loadSettings()
             && type == REG_DWORD)
             g_addReadOnly = (v != 0);
     }
+    ::RegCloseKey(hKey);
+}
+
+// ── savePendingRestoreRegistry ────────────────────────────────────────────────
+//
+// Writes g_pendingRestorePaths to HKCU\Software\FileLockPlugin\PendingRestore
+// as REG_MULTI_SZ so crash recovery can find them at the next startup.
+// Deletes the value if the set is empty.
+// ─────────────────────────────────────────────────────────────────────────────
+static void savePendingRestoreRegistry()
+{
+    HKEY hKey = nullptr;
+    if (::RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, nullptr,
+                          REG_OPTION_NON_VOLATILE, KEY_SET_VALUE,
+                          nullptr, &hKey, nullptr) != ERROR_SUCCESS)
+        return;
+
+    if (g_pendingRestorePaths.empty())
+    {
+        ::RegDeleteValueW(hKey, L"PendingRestore");
+    }
+    else
+    {
+        std::vector<wchar_t> buf;
+        for (const auto& p : g_pendingRestorePaths)
+        {
+            buf.insert(buf.end(), p.begin(), p.end());
+            buf.push_back(L'\0');
+        }
+        buf.push_back(L'\0');   // REG_MULTI_SZ double-null terminator
+        ::RegSetValueExW(hKey, L"PendingRestore", 0, REG_MULTI_SZ,
+                         reinterpret_cast<const BYTE*>(buf.data()),
+                         static_cast<DWORD>(buf.size() * sizeof(wchar_t)));
+    }
+    ::RegCloseKey(hKey);
+}
+
+// ── crashRecoveryRestore ──────────────────────────────────────────────────────
+//
+// Called once from setInfo() before Notepad++ opens any session files.
+// Reads the PendingRestore registry list — paths where we set
+// FILE_ATTRIBUTE_READONLY in a session that ended without cleanup (crash /
+// force-kill).  Clears the attribute on those files so Notepad++ opens them
+// as writable, then deletes the registry value.
+//
+// Without this, a crash leaves files permanently stuck: applyReadOnly() sees
+// the flag already set, saves "originally read-only", and restoreReadOnly()
+// restores that same flag every normal shutdown — a loop that never breaks.
+// ─────────────────────────────────────────────────────────────────────────────
+static void crashRecoveryRestore()
+{
+    HKEY hKey = nullptr;
+    if (::RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0,
+                        KEY_QUERY_VALUE | KEY_SET_VALUE, &hKey) != ERROR_SUCCESS)
+        return;
+
+    DWORD type = 0, size = 0;
+    if (::RegQueryValueExW(hKey, L"PendingRestore", nullptr,
+                           &type, nullptr, &size) != ERROR_SUCCESS
+        || type != REG_MULTI_SZ || size == 0)
+    {
+        ::RegCloseKey(hKey);
+        return;
+    }
+
+    std::vector<wchar_t> buf(size / sizeof(wchar_t));
+    if (::RegQueryValueExW(hKey, L"PendingRestore", nullptr, &type,
+                           reinterpret_cast<BYTE*>(buf.data()),
+                           &size) == ERROR_SUCCESS)
+    {
+        for (const wchar_t* p = buf.data(); *p; p += ::wcslen(p) + 1)
+        {
+            DWORD attrs = ::GetFileAttributesW(p);
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
+                ::SetFileAttributesW(p, attrs & ~FILE_ATTRIBUTE_READONLY);
+        }
+    }
+
+    ::RegDeleteValueW(hKey, L"PendingRestore");
     ::RegCloseKey(hKey);
 }
 
@@ -407,7 +570,11 @@ static void applyReadOnly(const std::wstring& path)
         return;
     g_readOnlyOriginals[path] = attrs;
     if (!(attrs & FILE_ATTRIBUTE_READONLY))
+    {
         ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
+        g_pendingRestorePaths.insert(path);
+        savePendingRestoreRegistry();
+    }
 }
 
 // ── restoreReadOnly ───────────────────────────────────────────────────────────
@@ -422,6 +589,8 @@ static void restoreReadOnly(const std::wstring& path)
         return;
     ::SetFileAttributesW(path.c_str(), it->second);
     g_readOnlyOriginals.erase(it);
+    if (g_pendingRestorePaths.erase(path))
+        savePendingRestoreRegistry();
 }
 
 // ── getFileOwnerProcessNames ──────────────────────────────────────────────────
@@ -546,7 +715,10 @@ static bool lockPath(const std::wstring& path)
         return false;
 
     g_lockMap[path] = h;
-    if (g_addReadOnly)
+    // Only set FILE_ATTRIBUTE_READONLY while Notepad++ is NOT focused.
+    // While focused, the attribute stays clear so monitoring never fires the
+    // SET event → buffer._isReadOnly stays false → all tabs remain editable.
+    if (g_addReadOnly && !g_nppFocused)
         applyReadOnly(path);
     return true;
 }
@@ -582,6 +754,8 @@ static void releaseAllLocks()
     g_lockMap.clear();
     g_readOnlyOriginals.clear();  // safety net for any entries not in g_lockMap
     g_foreignOpenPaths.clear();
+    g_pendingRestorePaths.clear();
+    savePendingRestoreRegistry();  // clear the crash-recovery registry entry
 }
 
 
@@ -663,6 +837,177 @@ static std::vector<std::wstring> enumerateOpenFilePaths()
     return result;
 }
 
+// ── makeBufferEditable ────────────────────────────────────────────────────────
+//
+// Calls NPPM_SETBUFFERREADONLY(bufferId, FALSE) to clear Notepad++'s internal
+// buffer._isReadOnly flag for the specified file.  Notepad++ processes this
+// via buf->setReadOnly(false) which also calls pdoc->SetReadOnly(false) —
+// the same direct C++ path that was setting pdoc=true, now clearing it.
+//
+// Buffer IDs come from g_idToPath (populated by NPPN_BUFFERACTIVATED) which
+// stores the real internal IDs even though NPPM_GETCURRENTBUFFERID is broken.
+// ─────────────────────────────────────────────────────────────────────────────
+// FL_NPPM_GETCURRENTBUFFERID — value of the NPPM_GETCURRENTBUFFERID message.
+// Documented as broken (returns same value for all tabs) but worth testing
+// whether NPPM_SETBUFFERREADONLY still acts on the current buffer.
+static const UINT FL_NPPM_GETCURRENTBUFFERID = 2108;  // NOTEPADPLUS_USER(2048) + 60
+
+static void makeBufferEditable(const std::wstring& path)
+{
+    if (!g_addReadOnly || path.empty()) return;
+
+    // Attempt 1: reverse-lookup from g_idToPath (populated by NPPN_ notifications).
+    // In practice NPPN_BUFFERACTIVATED never fires in this build so this is
+    // usually empty — but keep it for correctness.
+    uptr_t bufferId = 0;
+    for (const auto& kv : g_idToPath)
+        if (kv.second == path) { bufferId = kv.first; break; }
+
+    // Attempt 2: fall back to NPPM_GETCURRENTBUFFERID.
+    // Documented as broken but NPPM_SETBUFFERREADONLY might still work on the
+    // current buffer context even with a stale ID.
+    if (!bufferId)
+    {
+        bufferId = static_cast<uptr_t>(
+            ::SendMessage(g_nppData._nppHandle, FL_NPPM_GETCURRENTBUFFERID, 0, 0));
+        log(L"makeBufferEditable: using NPPM_GETCURRENTBUFFERID = %llu",
+            static_cast<unsigned long long>(bufferId));
+    }
+
+    if (!bufferId)
+    {
+        log(L"makeBufferEditable: no buffer ID available");
+        return;
+    }
+
+    // Call NPPM_SETBUFFERREADONLY — Notepad++ calls buf->setReadOnly(false)
+    // + pdoc->SetReadOnly(false) internally.  No SCI_ADDTEST here (causes
+    // recursive WM_SETTEXT calls via Notepad++'s internal title-bar update).
+    LRESULT res = ::SendMessage(g_nppData._nppHandle,
+                                NPPM_SETBUFFERREADONLY,
+                                static_cast<WPARAM>(bufferId),
+                                static_cast<LPARAM>(FALSE));
+    log(L"makeBufferEditable: NPPM_SETBUFFERREADONLY(%llu,FALSE) = %d",
+        static_cast<unsigned long long>(bufferId), static_cast<int>(res));
+}
+
+// ── cmdHookProc ───────────────────────────────────────────────────────────────
+//
+// WH_CALLWNDPROC hook procedure.  Fires BEFORE a sent message reaches its
+// destination window procedure.  Unlike WH_CALLWNDPROCRET (which fires after),
+// modifications to the CWPSTRUCT here take effect — the window proc receives
+// our modified wParam.
+//
+// We intercept SCI_SETREADONLY 1 sent to either Scintilla view and change the
+// wParam to 0 so Scintilla processes SCI_SETREADONLY(0) instead.  This prevents
+// pdoc->readonly from being set to true while keeping the document writable.
+// Only fires when g_pendingRestorePaths is non-empty (i.e., we have at least
+// one file whose original attribute was writable but we set FILE_ATTRIBUTE_READONLY
+// on it), so genuinely originally-read-only files are unaffected.
+// ─────────────────────────────────────────────────────────────────────────────
+static LRESULT CALLBACK cmdHookProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && !g_enumerating)
+    {
+        const CWPSTRUCT* p = reinterpret_cast<const CWPSTRUCT*>(lParam);
+
+        // WM_ACTIVATE (WA_ACTIVE / WA_CLICKACTIVE) on the Notepad++ main window:
+        // Notepad++ is about to gain focus.  Clear FILE_ATTRIBUTE_READONLY on all
+        // files we manage BEFORE WM_ACTIVATE is processed, so Notepad++ reads the
+        // files as writable during its activation check and never sets
+        // pdoc->readonly=true.  Skip during rename operations.
+        // WM_NOTIFY (TCN_SELCHANGE) — user is switching tabs.
+        // Log the event for diagnostics and clear FILE_ATTRIBUTE_READONLY so
+        // Notepad++ reads the file as writable during buffer activation.
+        if (p->hwnd    == g_nppData._nppHandle
+            && p->message == WM_NOTIFY
+            && !g_enumerating
+            && g_preRenameLockedPaths.empty())
+        {
+            const NMHDR* nm = reinterpret_cast<const NMHDR*>(p->lParam);
+            if (nm && nm->code == TCN_SELCHANGE)
+            {
+                log(L"TAB SWITCH: TCN_SELCHANGE fired (before Notepad++ activates buffer)");
+                if (g_addReadOnly && !g_pendingRestorePaths.empty())
+                {
+                    for (const auto& path : g_pendingRestorePaths)
+                    {
+                        DWORD attrs = ::GetFileAttributesW(path.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
+                            ::SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+                    }
+                    log(L"TAB SWITCH: cleared FILE_ATTRIBUTE_READONLY before buffer activation");
+                }
+            }
+        }
+
+        // WM_ACTIVATE (WA_ACTIVE) — Notepad++ gaining focus.
+        // Mark as focused, clear FILE_ATTRIBUTE_READONLY so monitoring stays
+        // false → buffer._isReadOnly stays false → all tab switches keep pdoc=false.
+        // Also call NPPM_SETBUFFERREADONLY for the active tab in case the cache
+        // was set true during the unfocused period.
+        if (g_addReadOnly
+            && p->hwnd    == g_nppData._nppHandle
+            && p->message == WM_ACTIVATE
+            && LOWORD(p->wParam) != WA_INACTIVE
+            && g_preRenameLockedPaths.empty())
+        {
+            g_nppFocused = true;
+            for (const auto& path : g_pendingRestorePaths)
+            {
+                DWORD attrs = ::GetFileAttributesW(path.c_str());
+                if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
+                    ::SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+            }
+            log(L"WH_CALLWNDPROC WA_ACTIVE: g_nppFocused=true, cleared attrs");
+        }
+    }
+    return ::CallNextHookEx(g_hCmdHook, nCode, wParam, lParam);
+}
+
+// ── sciSubclassProc ──────────────────────────────────────────────────────────
+//
+// Window subclass procedure installed on both Scintilla views.
+// Intercepts SCI_SETREADONLY 1 and passes 0 to DefSubclassProc instead.
+//
+// Unlike WH_CALLWNDPROC (where MSDN says parameters cannot be modified), a
+// subclass proc is directly in the call chain and passes its own wParam to the
+// original window procedure via DefSubclassProc — the change is guaranteed to
+// take effect.
+//
+// This prevents Notepad++ from setting pdoc->readonly=true via SCI_SETREADONLY 1,
+// which cannot be undone via the Scintilla message API (SCI_SETREADONLY 0 only
+// clears the view flag, not pdoc->readonly).
+//
+// Only intercepts when g_pendingRestorePaths is non-empty, meaning we have at
+// least one file whose FILE_ATTRIBUTE_READONLY was set by this plugin (i.e., the
+// file was originally writable).  Files that were read-only before being opened
+// are not in g_pendingRestorePaths and are therefore unaffected.
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnostic counters for sciSubclassProc — shown in Show Lock Status.
+static int g_subclassCallCount      = 0;  // total SCI_SETREADONLY calls seen
+static int g_subclassInterceptCount = 0;  // times we changed 1 → 0
+
+static LRESULT CALLBACK sciSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
+                                         LPARAM lParam, UINT_PTR /*uId*/,
+                                         DWORD_PTR /*dwRef*/)
+{
+    if (msg == SCI_SETREADONLY)
+    {
+        ++g_subclassCallCount;
+        dbg(L"FL: sciSubclass SCI_SETREADONLY wParam=%d addRO=%d pending=%zu\n",
+            (int)wParam, (int)g_addReadOnly, g_pendingRestorePaths.size());
+
+        if (g_addReadOnly && wParam == 1 && !g_pendingRestorePaths.empty())
+        {
+            ++g_subclassInterceptCount;
+            wParam = 0;
+            dbg(L"FL: sciSubclass intercepted → changed to 0\n");
+        }
+    }
+    return ::DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 // ── getMsgHookProc ────────────────────────────────────────────────────────────
 //
 // WH_GETMESSAGE hook procedure.  Fires when a posted message is retrieved from
@@ -703,6 +1048,12 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                 std::vector<std::wstring> allPaths = enumerateOpenFilePaths();
                 for (const auto& p : allPaths)
                     lockPath(p);
+
+                log(L"WM_FL_LOCK_ALL: locked %zu files  addRO=%d  pending=%zu",
+                    allPaths.size(), (int)g_addReadOnly, g_pendingRestorePaths.size());
+                // Fix startup active tab via the proper API.
+                std::wstring activePath = getCurrentFilePath();
+                if (!activePath.empty()) makeBufferEditable(activePath);
             }
         }
 
@@ -797,6 +1148,42 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
     if (nCode == HC_ACTION && !g_enumerating)
     {
         const CWPRETSTRUCT* p = reinterpret_cast<const CWPRETSTRUCT*>(lParam);
+
+        // ── SCI_SETREADONLY intercept ─────────────────────────────────────────
+        // When Add Read-only is enabled, applyReadOnly() sets FILE_ATTRIBUTE_READONLY
+        // on locked files.  Notepad++ detects this (at tab-switch time and via its
+        // async file-change monitor) and calls SCI_SETREADONLY 1 on the Scintilla
+        // view, making the editor non-editable.  We intercept that call here:
+        // WH_CALLWNDPROCRET fires synchronously after SCI_SETREADONLY 1 completes,
+        // so immediately sending SCI_SETREADONLY 0 reverses the effect before any
+        // user input is processed.  We only do this for files whose original attrs
+        // did NOT include FILE_ATTRIBUTE_READONLY (i.e., files WE made read-only,
+        // not files that were read-only before the user opened them).
+        if (p->message == SCI_SETREADONLY
+            && (p->hwnd == g_nppData._scintillaMainHandle
+                || p->hwnd == g_nppData._scintillaSecondHandle))
+        {
+            dbg(L"FL: SCI_SETREADONLY intercepted  wParam=%d  addRO=%d  originals=%zu\n",
+                (int)p->wParam, (int)g_addReadOnly, g_readOnlyOriginals.size());
+
+            if (g_addReadOnly && p->wParam == 1)
+            {
+                bool weOwn = false;
+                for (const auto& kv : g_readOnlyOriginals)
+                    if (!(kv.second & FILE_ATTRIBUTE_READONLY)) { weOwn = true; break; }
+
+                dbg(L"FL:   weOwn=%d — %s\n", (int)weOwn,
+                    weOwn ? L"sending SCI_SETREADONLY 0" : L"NOT overriding");
+
+                if (weOwn)
+                {
+                    ::SendMessage(p->hwnd, SCI_SETREADONLY, 0, 0);
+                    LRESULT now = ::SendMessage(p->hwnd, SCI_GETREADONLY, 0, 0);
+                    dbg(L"FL:   SCI_GETREADONLY after override = %d\n", (int)now);
+                }
+            }
+        }
+
         if (p->hwnd == g_nppData._nppHandle && p->message == WM_SETTEXT)
         {
             // Lazily cache the tab bar handle if not yet found.
@@ -898,6 +1285,36 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                 lockPath(currentPath);
             }
 
+            // FILE_ATTRIBUTE_READONLY is NOT restored here while Notepad++ is focused.
+            // Keeping it clear ensures monitoring never fires the SET event so
+            // buffer._isReadOnly stays false and all tab switches keep pdoc false.
+            // It is restored only in the WA_INACTIVE handler when Notepad++ loses focus.
+
+            // Correlate the pending buffer ID (saved in NPPN_BUFFERACTIVATED before
+            // the title bar updated) with the now-known path.
+            if (g_pendingBufferId && !currentPath.empty())
+            {
+                g_idToPath[g_pendingBufferId] = currentPath;
+                log(L"WM_SETTEXT: stored pendingBufferId=%llu → '%s'",
+                    (unsigned long long)g_pendingBufferId, currentPath.c_str());
+                g_pendingBufferId = 0;
+            }
+
+            // Diagnostic: log the complete state after tab switch
+            {
+                uptr_t bid = 0;
+                for (const auto& kv : g_idToPath)
+                    if (kv.second == currentPath) { bid = kv.first; break; }
+                log(L"TAB SWITCH: WM_SETTEXT complete  path='%s'  RO=%d  bufferId=%llu",
+                    currentPath.c_str(),
+                    (int)::SendMessage(g_nppData._scintillaMainHandle, SCI_GETREADONLY, 0, 0),
+                    (unsigned long long)bid);
+            }
+
+            // Call NPPM_SETBUFFERREADONLY to instantly clear pdoc for this tab.
+            if (g_addReadOnly && !currentPath.empty())
+                makeBufferEditable(currentPath);
+
             // Safety net: if a save failed (NPPN_FILESAVED never fired),
             // re-apply FILE_ATTRIBUTE_READONLY on the next title-bar update.
             if (!g_saveClearedPaths.empty())
@@ -920,6 +1337,38 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
         // IDM_FILE_RENAME_EXEC (22003) and before MoveFileExW.  Re-locking
         // here would block the rename.  Cancel detection is handled in the
         // WM_SETTEXT block above once g_renameOpDispatched is set.
+
+        // WM_ACTIVATE (WA_ACTIVE) — after Notepad++ has processed the activation.
+        // Call NPPM_SETBUFFERREADONLY for the current tab to instantly clear pdoc
+        // in case buffer._isReadOnly was true (from monitoring during unfocused period).
+        // Do NOT restore FILE_ATTRIBUTE_READONLY here — keep it clear while focused
+        // so monitoring never fires the SET event and buffer._isReadOnly stays false.
+        if (g_addReadOnly
+            && p->hwnd    == g_nppData._nppHandle
+            && p->message == WM_ACTIVATE
+            && LOWORD(p->wParam) != WA_INACTIVE
+            && g_preRenameLockedPaths.empty())
+        {
+            std::wstring activePath = getCurrentFilePath();
+            if (!activePath.empty())
+                makeBufferEditable(activePath);
+            log(L"WH_CALLWNDPROCRET WA_ACTIVE: called makeBufferEditable (attrs stay clear)");
+        }
+
+        // WM_ACTIVATE (WA_INACTIVE, losing focus) — Notepad++ is no longer active.
+        // Now safe to set FILE_ATTRIBUTE_READONLY: monitoring will fire, but since
+        // Notepad++ is in the background it won't immediately activate any buffer.
+        if (g_addReadOnly
+            && p->hwnd    == g_nppData._nppHandle
+            && p->message == WM_ACTIVATE
+            && LOWORD(p->wParam) == WA_INACTIVE
+            && g_preRenameLockedPaths.empty())
+        {
+            g_nppFocused = false;
+            for (const auto& kv : g_lockMap)
+                applyReadOnly(kv.first);
+            log(L"WH_CALLWNDPROCRET WA_INACTIVE: g_nppFocused=false, applied attrs");
+        }
     }
     return ::CallNextHookEx(g_hTitleHook, nCode, wParam, lParam);
 }
@@ -945,8 +1394,11 @@ void pluginInit(HANDLE /*hModule*/)
 // ─────────────────────────────────────────────────────────────────────────────
 void pluginCleanUp()
 {
+    ::RemoveWindowSubclass(g_nppData._scintillaMainHandle,   sciSubclassProc, 0);
+    ::RemoveWindowSubclass(g_nppData._scintillaSecondHandle, sciSubclassProc, 1);
     if (g_hGetMsgHook) { ::UnhookWindowsHookEx(g_hGetMsgHook); g_hGetMsgHook = nullptr; }
     if (g_hTitleHook)  { ::UnhookWindowsHookEx(g_hTitleHook);  g_hTitleHook  = nullptr; }
+    if (g_hCmdHook)    { ::UnhookWindowsHookEx(g_hCmdHook);    g_hCmdHook    = nullptr; }
     releaseAllLocks();
 }
 
@@ -1237,11 +1689,148 @@ void showLockStatus()
     std::wstringstream ss;
     ss << L"Locked files (" << g_lockMap.size() << L"):\r\n\r\n";
     for (const auto& kv : g_lockMap)
-        ss << L"  • " << kv.first << L"\r\n";
+        ss << L"  \x2022 " << kv.first << L"\r\n";
     ss << L"\r\nAutomatic locking: " << (g_lockingEnabled ? L"ON" : L"OFF");
 
+    // ── Event log (since startup) ─────────────────────────────────────────
+    ss << L"\r\n\r\n─── Event log ───\r\n";
+    if (g_log.empty())
+        ss << L"  (no events recorded yet)\r\n";
+    else
+        for (const auto& line : g_log)
+            ss << L"  " << line << L"\r\n";
+
+    // ── Live state ───────────────────────────────────────────────────────
+    ss << L"\r\n─── Live state ───\r\n";
+    LRESULT roMain = ::SendMessage(g_nppData._scintillaMainHandle,
+                                   SCI_GETREADONLY, 0, 0);
+    LRESULT roSec  = ::SendMessage(g_nppData._scintillaSecondHandle,
+                                   SCI_GETREADONLY, 0, 0);
+    ss << L"SCI_GETREADONLY  main=" << roMain << L"  second=" << roSec
+       << L"  (0=editable, 1=read-only)\r\n";
+
+    // sciSubclassProc counters — confirm subclass is installed and intercepting
+    ss << L"sciSubclassProc: SCI_SETREADONLY calls seen=" << g_subclassCallCount
+       << L"  intercepted(1→0)=" << g_subclassInterceptCount << L"\r\n";
+
+    // Scintilla handle validity
+    ss << L"Scintilla handles  main="
+       << (g_nppData._scintillaMainHandle ? L"valid" : L"NULL")
+       << L"  second="
+       << (g_nppData._scintillaSecondHandle ? L"valid" : L"NULL") << L"\r\n";
+
+    // g_readOnlyOriginals — what we track as "originally writable"
+    ss << L"\r\ng_readOnlyOriginals (" << g_readOnlyOriginals.size() << L"):\r\n";
+    for (const auto& kv : g_readOnlyOriginals)
+    {
+        bool origRO = (kv.second & FILE_ATTRIBUTE_READONLY) != 0;
+        ss << L"  " << kv.first
+           << (origRO ? L"  [originally RO — NOT overriding Scintilla]"
+                       : L"  [originally writable — weOwn=true]")
+           << L"\r\n";
+    }
+
+    // g_pendingRestorePaths — crash recovery registry list
+    ss << L"\r\ng_pendingRestorePaths (" << g_pendingRestorePaths.size() << L"):\r\n";
+    for (const auto& p : g_pendingRestorePaths)
+        ss << L"  " << p << L"\r\n";
+
+    // Force SCI_SETREADONLY 0 right now and re-check (Phase 1)
+    ::SendMessage(g_nppData._scintillaMainHandle, SCI_SETREADONLY, 0, 0);
+    LRESULT roForced = ::SendMessage(g_nppData._scintillaMainHandle,
+                                     SCI_GETREADONLY, 0, 0);
+    ss << L"\r\nAfter forcing SCI_SETREADONLY 0  →  SCI_GETREADONLY=" << roForced << L"\r\n";
+
+    // IMMEDIATE insert test — no dialog in between, no WM_ACTIVATE, no Notepad++ callbacks.
+    // If this fails, the document-level readonly is separate from the API-level flag:
+    // SCI_SETREADONLY only sets the editor view's flag, not pdoc->readonly.
+    // If this succeeds, the issue is purely timing (Notepad++ re-applies after WM_ACTIVATE).
+    LRESULT lenImm0 = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0); // SCI_GETLENGTH
+    const char testCh = ' ';
+    ::SendMessage(g_nppData._scintillaMainHandle, 2001, 1,
+                  reinterpret_cast<LPARAM>(&testCh));                              // SCI_ADDTEXT
+    LRESULT lenImm1 = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0);
+    bool immOk = (lenImm1 == lenImm0 + 1);
+    if (immOk)
+        ::SendMessage(g_nppData._scintillaMainHandle, 2279, 0, 0);                // SCI_UNDO
+
+    ss << L"IMMEDIATE SCI_ADDTEXT right after SETREADONLY 0: "
+       << (immOk ? L"SUCCEEDED" : L"FAILED")
+       << L"  (lenBefore=" << lenImm0 << L"  lenAfter=" << lenImm1 << L")\r\n";
+
+    if (immOk)
+        ss << L"  → SCI_SETREADONLY affects pdoc correctly; re-apply is a timing issue.\r\n";
+    else
+        ss << L"  → SCI_SETREADONLY does NOT clear pdoc->readonly — two separate flags.\r\n"
+              L"    SCI_GETREADONLY=0 is the view flag only; document remains locked.\r\n";
+
+    dbg(L"FL: showLockStatus  roMain=%d  immOk=%d  lb=%d  la=%d  originals=%zu\n",
+        (int)roMain, (int)immOk, (int)lenImm0, (int)lenImm1,
+        g_readOnlyOriginals.size());
+
+    // Phase 1 dialog — show everything above
+    ss << L"\r\nClick OK — a second dialog will check the state AFTER WM_ACTIVATE fires.";
     ::MessageBoxW(g_nppData._nppHandle,
-        ss.str().c_str(), L"FileLock – Status", MB_OK | MB_ICONINFORMATION);
+        ss.str().c_str(), L"FileLock \x2013 Status (1/2)", MB_OK | MB_ICONINFORMATION);
+
+    // ── Phase 2: check state after WM_ACTIVATE has fired ─────────────────────
+    // After the first dialog closed, Notepad++ received WM_ACTIVATE / WM_SETFOCUS.
+    // If something re-applied SCI_SETREADONLY 1 during that sequence, it shows here.
+    LRESULT roAfterActivate = ::SendMessage(g_nppData._scintillaMainHandle,
+                                            SCI_GETREADONLY, 0, 0);
+
+    // Test: can Scintilla accept a programmatic text insertion right now?
+    // Uses correct Scintilla message IDs:
+    //   SCI_GETLENGTH  = 2006  (byte length of document)
+    //   SCI_ADDTEXT    = 2001  (append bytes at current position)
+    //   SCI_UNDO       = 2279
+    bool insertWorked = false;
+    if (roAfterActivate == 0)
+    {
+        LRESULT lenBefore = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0);
+        const char space = ' ';
+        ::SendMessage(g_nppData._scintillaMainHandle, 2001,
+                      1, reinterpret_cast<LPARAM>(&space));
+        LRESULT lenAfter = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0);
+        insertWorked = (lenAfter == lenBefore + 1);
+        dbg(L"FL: insert test  lenBefore=%d  lenAfter=%d  worked=%d\n",
+            (int)lenBefore, (int)lenAfter, (int)insertWorked);
+        if (insertWorked)
+            ::SendMessage(g_nppData._scintillaMainHandle, 2279, 0, 0); // SCI_UNDO
+        else
+            dbg(L"FL: insert FAILED — length unchanged despite SCI_GETREADONLY=0\n");
+    }
+
+    std::wstringstream ss2;
+    ss2 << L"State AFTER WM_ACTIVATE\r\n\r\n"
+        << L"SCI_GETREADONLY = " << roAfterActivate
+        << L"  (0=editable, 1=read-only)\r\n\r\n";
+
+    if (roAfterActivate == 0)
+    {
+        ss2 << L"Programmatic insert test: "
+            << (insertWorked ? L"SUCCEEDED (Scintilla accepted the character)\r\n\r\n"
+                             : L"FAILED (Scintilla refused even though SCI_GETREADONLY=0)\r\n\r\n");
+    }
+
+    if (roAfterActivate == 1)
+        ss2 << L"SCI_SETREADONLY was re-applied to 1 after WM_ACTIVATE.\r\n"
+               L"The intercept in WH_CALLWNDPROCRET is not catching this call\r\n"
+               L"(Notepad++ may be using PostMessage, not SendMessage).\r\n";
+    else if (!insertWorked)
+        ss2 << L"Scintilla is in writable mode but cannot accept text.\r\n"
+               L"Notepad++ is blocking input above the Scintilla level\r\n"
+               L"(e.g. its internal buffer._isReadOnly flag).\r\n";
+    else
+        ss2 << L"Scintilla is fully writable and accepts insertions.\r\n"
+               L"If keyboard input still does not work, please click\r\n"
+               L"directly in the editor area and try typing now.\r\n";
+
+    dbg(L"FL: showLockStatus phase2  roAfterActivate=%d  insertWorked=%d\n",
+        (int)roAfterActivate, (int)insertWorked);
+
+    ::MessageBoxW(g_nppData._nppHandle,
+        ss2.str().c_str(), L"FileLock \x2013 Status (2/2)", MB_OK | MB_ICONINFORMATION);
 }
 
 // ── toggleAddReadOnly ────────────────────────────────────────────────────────
@@ -1249,8 +1838,9 @@ void showLockStatus()
 // Flips g_addReadOnly and updates the menu check-mark.
 //
 // Enabling:
-//   Calls applyReadOnly() for every file currently in g_lockMap.
-//   From this point on, lockPath() will also set the read-only attribute.
+//   Calls applyReadOnly() for every file currently in g_lockMap so all locked
+//   files immediately get FILE_ATTRIBUTE_READONLY.  Notepad++ is kept editable
+//   via the SCI_SETREADONLY intercept in titleBarHookProc.
 //
 // Disabling:
 //   Calls restoreReadOnly() for every path in g_readOnlyOriginals, restoring
@@ -1274,13 +1864,16 @@ void toggleAddReadOnly()
 
     if (g_addReadOnly)
     {
-        for (const auto& kv : g_lockMap)
-            applyReadOnly(kv.first);
+        if (!g_nppFocused)
+            for (const auto& kv : g_lockMap)
+                applyReadOnly(kv.first);
 
         ::MessageBox(
             g_nppData._nppHandle,
             _T("\"Add Read-only\" is now ENABLED.\r\n"
-               "Locked files have FILE_ATTRIBUTE_READONLY set on disk."),
+               "FILE_ATTRIBUTE_READONLY is set on locked files while\r\n"
+               "Notepad++ is not the active window.\r\n\r\n"
+               "Files remain fully editable within Notepad++."),
             _T("FileLock"),
             MB_OK | MB_ICONINFORMATION
         );
@@ -1339,7 +1932,8 @@ extern "C" __declspec(dllexport) BOOL isUnicode()
 extern "C" __declspec(dllexport) void setInfo(NppData notepadPlusData)
 {
     g_nppData = notepadPlusData;
-    loadSettings();       // must precede commandMenuInit() so _init2Check reflects saved state
+    crashRecoveryRestore(); // clear FILE_ATTRIBUTE_READONLY on files from a crashed session
+    loadSettings();         // must precede commandMenuInit() so _init2Check reflects saved state
     commandMenuInit();
 
     // Install both message hooks here rather than in NPPN_READY (which never
@@ -1357,6 +1951,16 @@ extern "C" __declspec(dllexport) void setInfo(NppData notepadPlusData)
                                             getMsgHookProc, nullptr, tid);
         g_hTitleHook  = ::SetWindowsHookEx(WH_CALLWNDPROCRET,
                                             titleBarHookProc, nullptr, tid);
+        g_hCmdHook    = ::SetWindowsHookEx(WH_CALLWNDPROC,
+                                            cmdHookProc, nullptr, tid);
+        // Subclass both Scintilla views to intercept SCI_SETREADONLY 1 before
+        // Scintilla processes it.  Unlike WH_CALLWNDPROC (which cannot reliably
+        // modify the parameters), the subclass proc calls DefSubclassProc with
+        // our own wParam, so the change is guaranteed.
+        ::SetWindowSubclass(g_nppData._scintillaMainHandle,
+                            sciSubclassProc, 0, 0);
+        ::SetWindowSubclass(g_nppData._scintillaSecondHandle,
+                            sciSubclassProc, 1, 0);
     }
 }
 
@@ -1450,9 +2054,15 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
 
         case NPPN_BUFFERACTIVATED:
         {
+            // Always save the buffer ID — even if the title bar hasn't updated yet.
+            // WM_SETTEXT will correlate this ID with the path when it fires.
+            g_pendingBufferId = bufferId;
+
             // Fires after every buffer switch — tab change OR new file open.
             // getCurrentFilePath() reliably returns the now-active file's path.
             std::wstring path = getCurrentFilePath();
+            log(L"NPPN_BUFFERACTIVATED: bufferId=%llu  path='%s'",
+                (unsigned long long)bufferId, path.c_str());
             if (path.empty()) break;
 
             auto it = g_idToPath.find(bufferId);
@@ -1475,6 +2085,22 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
                 it->second = path;
             }
             // else: known buffer re-activated (tab switch) — no action needed.
+
+            // If Add Read-only is on and this file is managed by us, clear
+            // Scintilla's read-only state.  Notepad++ calls pdoc->SetReadOnly(true)
+            // via direct C++ during buffer activation (before WM_SETTEXT fires),
+            // so this is the earliest point we can counter it.
+            if (g_addReadOnly && !path.empty() && g_pendingRestorePaths.count(path))
+            {
+                LRESULT roBefore = ::SendMessage(g_nppData._scintillaMainHandle,
+                                                 SCI_GETREADONLY, 0, 0);
+                ::SendMessage(g_nppData._scintillaMainHandle,   SCI_SETREADONLY, 0, 0);
+                ::SendMessage(g_nppData._scintillaSecondHandle, SCI_SETREADONLY, 0, 0);
+                LRESULT roAfter = ::SendMessage(g_nppData._scintillaMainHandle,
+                                                SCI_GETREADONLY, 0, 0);
+                log(L"BUFFERACTIVATED: RO_before=%d  RO_after=%d",
+                    (int)roBefore, (int)roAfter);
+            }
             break;
         }
 
@@ -1585,8 +2211,11 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
         }
 
         case NPPN_SHUTDOWN:
+            ::RemoveWindowSubclass(g_nppData._scintillaMainHandle,   sciSubclassProc, 0);
+            ::RemoveWindowSubclass(g_nppData._scintillaSecondHandle, sciSubclassProc, 1);
             if (g_hGetMsgHook) { ::UnhookWindowsHookEx(g_hGetMsgHook); g_hGetMsgHook = nullptr; }
             if (g_hTitleHook)  { ::UnhookWindowsHookEx(g_hTitleHook);  g_hTitleHook  = nullptr; }
+            if (g_hCmdHook)    { ::UnhookWindowsHookEx(g_hCmdHook);    g_hCmdHook    = nullptr; }
             commandMenuCleanUp();
             releaseAllLocks();  // restores r/o attributes and clears g_readOnlyOriginals
             g_idToPath.clear();
