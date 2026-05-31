@@ -213,6 +213,12 @@ static const UINT IDM_FILE_RENAME = 41017;
 // Notepad++ to skip title-bar updates for all but the first tab switch).
 static const UINT WM_FL_LOCK_ALL = WM_APP + 1;
 
+// WM_FL_CHECK_CLOSE — thread message posted by the WM_SETTEXT handler when
+// the tab count decreases.  enumerateOpenFilePaths() fails from WH_CALLWNDPROCRET
+// (Notepad++ re-entrancy guard prevents title updates during hook execution),
+// so close detection is deferred to the normal message loop where it works.
+static const UINT WM_FL_CHECK_CLOSE = WM_APP + 2;
+
 // SCI_SETREADONLY and SCI_GETREADONLY are now defined in the full Scintilla.h.
 
 // g_log — in-memory event log shown by Show Lock Status.
@@ -223,7 +229,7 @@ static DWORD g_logBase = 0;   // GetTickCount() at first log entry
 
 static void log(const wchar_t* fmt, ...)
 {
-    if (g_log.size() >= 60) return;
+    if (g_log.size() >= 200) return;
 
     wchar_t buf[512];
     va_list ap;
@@ -725,6 +731,7 @@ static void unlockPath(const std::wstring& path)
     auto it = g_lockMap.find(path);
     if (it != g_lockMap.end())
     {
+        log(L"unlockPath: releasing '%s'", path.c_str());
         restoreReadOnly(path);
         releaseLock(it->second);
         g_lockMap.erase(it);
@@ -1056,6 +1063,40 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
             }
         }
 
+        // Deferred tab-close check.  Posted by the WM_SETTEXT handler when the
+        // tab count drops, because enumerateOpenFilePaths() fails when called
+        // from inside WH_CALLWNDPROCRET (Notepad++ re-entrancy guard).
+        if (msg->hwnd == nullptr && msg->message == WM_FL_CHECK_CLOSE)
+        {
+            if (!g_lockMap.empty() || !g_foreignOpenPaths.empty())
+            {
+                std::vector<std::wstring> openPaths = enumerateOpenFilePaths();
+                log(L"WM_FL_CHECK_CLOSE: open=%zu  locked=%zu",
+                    openPaths.size(), g_lockMap.size());
+
+                std::vector<std::wstring> toUnlock;
+                for (const auto& kv : g_lockMap)
+                {
+                    bool found = false;
+                    for (const auto& op : openPaths)
+                        if (op == kv.first) { found = true; break; }
+                    if (!found)
+                        toUnlock.push_back(kv.first);
+                }
+                for (const auto& p : toUnlock)
+                    unlockPath(p);
+
+                for (auto it = g_foreignOpenPaths.begin();
+                     it != g_foreignOpenPaths.end(); )
+                {
+                    bool found = false;
+                    for (const auto& op : openPaths)
+                        if (op == *it) { found = true; break; }
+                    it = found ? ++it : g_foreignOpenPaths.erase(it);
+                }
+            }
+        }
+
         if (msg->message == WM_COMMAND)
         {
             UINT cmdId = LOWORD(msg->wParam);
@@ -1202,28 +1243,14 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                 if (currentCount < g_prevTabCount
                     && (!g_lockMap.empty() || !g_foreignOpenPaths.empty()))
                 {
-                    std::vector<std::wstring> openPaths = enumerateOpenFilePaths();
-                    std::vector<std::wstring> toUnlock;
-                    for (const auto& kv : g_lockMap)
-                    {
-                        bool found = false;
-                        for (const auto& op : openPaths)
-                            if (op == kv.first) { found = true; break; }
-                        if (!found)
-                            toUnlock.push_back(kv.first);
-                    }
-                    for (const auto& p : toUnlock)
-                        unlockPath(p);
-
-                    // Remove closed-file entries from the foreign-open warning set.
-                    for (auto it = g_foreignOpenPaths.begin();
-                         it != g_foreignOpenPaths.end(); )
-                    {
-                        bool found = false;
-                        for (const auto& op : openPaths)
-                            if (op == *it) { found = true; break; }
-                        it = found ? ++it : g_foreignOpenPaths.erase(it);
-                    }
+                    // enumerateOpenFilePaths() fails when called from within
+                    // WH_CALLWNDPROCRET — Notepad++'s re-entrancy guard prevents
+                    // title-bar updates during hook execution, so every tab returns
+                    // the same path and close detection unlocks everything else.
+                    // Defer to the normal message loop where enumeration works.
+                    log(L"TAB CLOSE DETECTED: currentCount=%d prevTabCount=%d — deferring",
+                        currentCount, g_prevTabCount);
+                    ::PostThreadMessageW(::GetCurrentThreadId(), WM_FL_CHECK_CLOSE, 0, 0);
                 }
                 g_prevTabCount = currentCount;
             }
@@ -1293,16 +1320,6 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
             //  g_pendingRestorePaths check, keeping those correctly non-editable.)
             if (g_addReadOnly && !currentPath.empty())
                 makeBufferEditable(currentPath);
-
-            // Correlate the pending buffer ID (saved in NPPN_BUFFERACTIVATED before
-            // the title bar updated) with the now-known path.
-            if (g_pendingBufferId && !currentPath.empty())
-            {
-                g_idToPath[g_pendingBufferId] = currentPath;
-                log(L"WM_SETTEXT: stored pendingBufferId=%llu → '%s'",
-                    (unsigned long long)g_pendingBufferId, currentPath.c_str());
-                g_pendingBufferId = 0;
-            }
 
             // Diagnostic: log the complete state after tab switch
             {
@@ -2054,10 +2071,6 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
 
         case NPPN_BUFFERACTIVATED:
         {
-            // Always save the buffer ID — even if the title bar hasn't updated yet.
-            // WM_SETTEXT will correlate this ID with the path when it fires.
-            g_pendingBufferId = bufferId;
-
             // Fires after every buffer switch — tab change OR new file open.
             // getCurrentFilePath() reliably returns the now-active file's path.
             std::wstring path = getCurrentFilePath();
@@ -2196,17 +2209,18 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
         case NPPN_FILEBEFORECLOSE:
         {
             auto it = g_idToPath.find(bufferId);
+            log(L"NPPN_FILEBEFORECLOSE: bufferId=%llu  known=%s",
+                (unsigned long long)bufferId,
+                (it != g_idToPath.end()) ? it->second.c_str() : L"(not in g_idToPath)");
             if (it != g_idToPath.end())
             {
                 unlockPath(it->second);
                 g_idToPath.erase(it);
             }
-            else
-            {
-                // Not in g_idToPath (e.g., session-restored file opened before
-                // the plugin loaded) — fall back to the title bar.
-                unlockPath(getCurrentFilePath());
-            }
+            // Do NOT fall back to getCurrentFilePath() for unknown buffers.
+            // An unknown bufferId means the close happened before we tracked it
+            // (e.g., a temporary buffer during session restore).  The deferred
+            // WM_FL_CHECK_CLOSE will clean up any orphaned locks instead.
             break;
         }
 

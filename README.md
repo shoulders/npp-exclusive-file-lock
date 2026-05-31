@@ -653,22 +653,81 @@ continues to call `pdoc->SetReadOnly(false)`.
 
 ---
 
+**Q: Why does `g_idToPath` (buffer ID → path) need careful management, and
+what was the corruption bug?**
+
+`g_idToPath` maps each Notepad++ buffer ID to its file path.  It is used to
+unlock the right file when a tab closes (`NPPN_FILEBEFORECLOSE` carries a
+buffer ID but not a path), and to supply the buffer ID to
+`NPPM_SETBUFFERREADONLY` when making a file editable.
+
+The original code also tried to populate this map from the `WM_SETTEXT` hook,
+storing `g_pendingBufferId` from each `NPPN_BUFFERACTIVATED` and writing
+`g_idToPath[g_pendingBufferId] = currentPath` when `WM_SETTEXT` fired next.
+
+This produced a systematic corruption.  The sequence for a manual tab switch is:
+
+```text
+1. TCN_SELCHANGE                — user clicked tab B
+2. Notepad++ switches buffers
+3. WM_SETTEXT                  — title bar updated to tab B's filename
+4. (WH_CALLWNDPROCRET fires)
+5. NPPN_BUFFERACTIVATED        — notification carries tab B's buffer ID
+```
+
+`NPPN_BUFFERACTIVATED` fires at step 5, **after** `WM_SETTEXT` at step 4.
+When the hook ran at step 4, `g_pendingBufferId` still held tab A's buffer ID
+from the *previous* `NPPN_BUFFERACTIVATED`.  The write therefore became:
+
+```text
+g_idToPath[tab_A_id] = tab_B_path   ← WRONG: tab A's ID mapped to tab B's path
+```
+
+Two or three switches later, `NPPN_BUFFERACTIVATED` fired for some tab C with
+its real buffer ID — but found that ID already mapped to the wrong path from an
+earlier WM_SETTEXT write.  It detected a "path changed" event that never
+happened and called `unlockPath(wrong_path)`, silently releasing a live lock.
+
+The fix is to remove the `WM_SETTEXT` correlation entirely.  With the full
+official plugin headers (`NPPN_FIRST = 1000`) installed, `NPPN_BUFFERACTIVATED`
+fires correctly for every tab switch and maintains `g_idToPath` on its own.
+
+**Q: Why must tab-close detection be deferred to the normal message loop?**
+
+When the tab count drops (detected inside the `WH_CALLWNDPROCRET` hook),
+the plugin needs to enumerate the remaining open files to find which locks
+are now orphaned.  `enumerateOpenFilePaths()` does this by cycling tabs with
+`TCM_SETCURSEL + WM_NOTIFY(TCN_SELCHANGE)` and reading the title bar each time.
+
+Called from within `WH_CALLWNDPROCRET`, Notepad++'s internal re-entrancy guard
+blocks all further title-bar updates — so every tab returns the same title as
+the one that triggered the original `WM_SETTEXT`.  The function returns the
+same path repeated N times, and the plugin unlocks every file that isn't the
+current one.
+
+The fix: post a `WM_FL_CHECK_CLOSE` thread message and return immediately.
+That message is processed by the `WH_GETMESSAGE` hook in the normal Notepad++
+message loop, where no re-entrancy guard is active and tab cycling works.
+
+---
+
 ## Implementation notes
 
-The standard Notepad++ plugin API is largely non-functional in this build:
-most `NPPM_` messages either crash Notepad++, trigger unrelated dialogs, or
-return wrong data, and `NPPN_` notifications fire with unexpected codes or not
-at all. The plugin therefore bypasses almost the entire standard API and relies
-on lower-level Windows mechanisms instead:
+The standard Notepad++ plugin API is largely non-functional in this build.
+Most `NPPM_` messages either crash Notepad++, trigger unrelated dialogs, or
+return wrong data.  `NPPN_` notification codes were also wrong until the full
+official plugin template headers were installed (`NPPN_FIRST` was off by 1048,
+causing every notification case to miss).  The plugin therefore bypasses much
+of the standard API and uses lower-level Windows mechanisms:
 
 | Concern | Approach |
 | --- | --- |
 | **Path resolution** | Title-bar parse via `GetWindowTextW` — the only reliable source of the active file's path |
-| **Lock identity** | `g_lockMap` keyed by file path, not buffer ID (`NPPM_GETCURRENTBUFFERID` returns the same value for every tab) |
+| **Lock identity** | `g_lockMap` keyed by file path; buffer IDs tracked in `g_idToPath` (populated by `NPPN_BUFFERACTIVATED`) for close-detection and `NPPM_SETBUFFERREADONLY` calls |
 | **Hook installation** | `setInfo()` — `NPPN_READY` never fires in this build |
 | **Auto-locking on file open** | `WH_CALLWNDPROCRET` hook watching `WM_SETTEXT` on the main window — fires after every title-bar update |
-| **Enumerating open files** | Programmatic tab cycling via `TCM_SETCURSEL` + `WM_NOTIFY(TCN_SELCHANGE)` on the tab bar `HWND` |
-| **Lock release on tab close** | `NPPN_FILEBEFORECLOSE` never fires; instead the hook detects a tab-count decrease and releases any lock whose path is no longer open |
+| **Enumerating open files** | Programmatic tab cycling via `TCM_SETCURSEL` + `WM_NOTIFY(TCN_SELCHANGE)` on the tab bar `HWND`, run only from the normal message loop (never from inside a hook) |
+| **Lock release on tab close** | `NPPN_FILEBEFORECLOSE` (code 1003) now fires with correct headers; hook also detects tab-count decreases and posts `WM_FL_CHECK_CLOSE` for deferred cleanup in the normal message loop |
 
 ---
 
