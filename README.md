@@ -576,6 +576,83 @@ provided through the **Rename Current File…** plugin command instead.
 
 ---
 
+## How Notepad++ read-only state works internally
+
+These questions came up during development and the answers are confirmed by
+runtime diagnostics.  They explain why certain approaches work or fail.
+
+**Q: When a tab is switched, what sets the Scintilla editor into read-only mode?
+It is not the file attribute — what is it?**
+
+Notepad++ maintains an internal cached `buffer._isReadOnly` flag in its C++
+`Buffer` object for each open file.  This cache is updated by Notepad++'s file
+monitor when it detects `FILE_ATTRIBUTE_READONLY` on disk.  When the user
+switches tabs, Notepad++ activates the new buffer and calls
+`pdoc->SetReadOnly(buffer._isReadOnly)` via a **direct C++ call** — not via the
+`SCI_SETREADONLY` message API.  Because it bypasses the message API, it cannot
+be intercepted by a `WH_CALLWNDPROC` hook or a window subclass.
+
+**Q: Does every tab switch update the Scintilla read-only flag for all files?**
+
+Yes.  Every tab switch activates the destination buffer, which reads
+`buffer._isReadOnly` from the cache and calls `pdoc->SetReadOnly()` for that
+specific buffer.  The flag is set per-switch, not retroactively for all open
+files at once.  Only the buffer being switched *to* is updated.
+
+**Q: In some earlier builds the initially selected file was editable on startup.
+What allowed that?**
+
+A timing gap in the startup sequence:
+
+1. Session files are opened **without** `FILE_ATTRIBUTE_READONLY` (it is cleared
+   by the crash-recovery logic before Notepad++ loads the session).  Notepad++
+   opens each buffer and sets `pdoc = false` at open time.
+2. `WM_FL_LOCK_ALL` fires later (after session restore) and sets
+   `FILE_ATTRIBUTE_READONLY` on disk.
+3. Notepad++'s file monitor detects the change and updates its **cache**:
+   `buffer._isReadOnly = true` for all files.
+4. **The active buffer's `pdoc` is not retroactively updated.**  `pdoc` is only
+   reset when a buffer is *activated* (i.e., when the user switches tabs), not
+   when the monitoring cache changes.
+5. Because no tab switch had occurred since step 1, the initially active tab
+   still had `pdoc = false` from file-open time and remained editable.
+
+Switching away and back to the originally active tab made it non-editable,
+because the tab switch triggered a fresh cache read (`buffer._isReadOnly = true`)
+and called `pdoc->SetReadOnly(true)`.
+
+**Q: What triggers Notepad++'s file monitor — is it an API call?**
+
+Yes.  Every call to `SetFileAttributesW` made by this plugin directly triggers
+Notepad++'s monitor.  The full chain is:
+
+```text
+Plugin calls SetFileAttributesW(path, attrs | FILE_ATTRIBUTE_READONLY)
+  → Windows kernel records the attribute change
+  → Windows delivers FILE_NOTIFY_CHANGE_ATTRIBUTES notification
+  → Notepad++'s ReadDirectoryChangesW callback receives it
+  → Monitoring thread posts a message to the main UI thread
+  → Main UI thread processes it → buffer._isReadOnly = true / false
+  → Next tab switch reads that cache → pdoc->SetReadOnly(true/false)
+```
+
+Notepad++ calls `ReadDirectoryChangesW` on the directories containing open files
+with the `FILE_NOTIFY_CHANGE_ATTRIBUTES` flag.  Any attribute change — including
+setting or clearing `FILE_ATTRIBUTE_READONLY` — produces a notification.
+
+The notification is **asynchronous** (typically 50–100 ms).  This means that
+when the plugin clears `FILE_ATTRIBUTE_READONLY` and then Notepad++ immediately
+processes `WM_ACTIVATE`, Notepad++ reads the *old cached* `buffer._isReadOnly`
+during the activation, not the current disk state.  The monitoring update arrives
+after `WM_ACTIVATE` has already been handled.
+
+This is why the focus-based protection works: if `FILE_ATTRIBUTE_READONLY` is
+never set while Notepad++ is focused, the monitor never fires the SET event,
+`buffer._isReadOnly` stays `false` from initial file-open, and every tab switch
+continues to call `pdoc->SetReadOnly(false)`.
+
+---
+
 ## Implementation notes
 
 The standard Notepad++ plugin API is largely non-functional in this build:

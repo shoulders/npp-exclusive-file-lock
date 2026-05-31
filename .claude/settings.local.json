@@ -16,7 +16,19 @@
       "Bash(cmd /c \"cd /d \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\\" && \\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" 2>nul && msbuild vs.proj\\\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo > build_out.txt 2>&1 && type build_out.txt\")",
       "Bash(cmd /c \"\\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" && msbuild vs.proj\\\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal\")",
       "Bash(cmd.exe /c \"cd /d \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\\" && \\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" 2>&1 && msbuild vs.proj\\\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal 2>&1\")",
-      "Bash(cmd.exe /c \"\\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" > nul 2>&1 && msbuild \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\vs.proj\\\\FileLockPlugin.vcxproj\\\\\" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal > C:\\\\Temp\\\\build_out.txt 2>&1 && echo BUILD_OK || echo BUILD_FAILED\")"
+      "Bash(cmd.exe /c \"\\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" > nul 2>&1 && msbuild \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\vs.proj\\\\FileLockPlugin.vcxproj\\\\\" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal > C:\\\\Temp\\\\build_out.txt 2>&1 && echo BUILD_OK || echo BUILD_FAILED\")",
+      "Bash(gh api *)",
+      "Bash(python3 -c \"import sys,json,base64; d=json.load\\(sys.stdin\\); print\\(base64.b64decode\\(d['content']\\).decode\\('utf-8'\\)\\)\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/npp-plugins/plugintemplate/master/src/Notepad_plus_msgs.h\")",
+      "PowerShell(Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/npp-plugins/plugintemplate/master/src/Notepad_plus_msgs.h\" -OutFile \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\src\\\\Notepad_plus_msgs.h\" -UseBasicParsing; Write-Host \"Downloaded: $\\(\\(Get-Item 'd:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\src\\\\Notepad_plus_msgs.h'\\).Length\\) bytes\")",
+      "PowerShell(Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/npp-plugins/plugintemplate/master/src/Scintilla.h\" -OutFile \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\src\\\\Scintilla.h\" -UseBasicParsing; Write-Host \"Downloaded: $\\(\\(Get-Item 'd:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\src\\\\Scintilla.h'\\).Length\\) bytes\")",
+      "PowerShell(Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/npp-plugins/plugintemplate/master/src/Sci_Position.h\" -OutFile \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\src\\\\Sci_Position.h\" -UseBasicParsing)",
+      "PowerShell(Invoke-WebRequest -Uri \"https://raw.githubusercontent.com/npp-plugins/plugintemplate/master/src/PluginInterface.h\" -OutFile \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\src\\\\PluginInterface.h\" -UseBasicParsing)"
     ]
-  }
+  },
+  "env": {
+    "MAX_THINKING_TOKENS": "10000"
+  },
+  "contextCompactionThreshold": 80,
+  "CLAUDE_CODE_SUBAGENT_MODEL": "haiku"
 }
