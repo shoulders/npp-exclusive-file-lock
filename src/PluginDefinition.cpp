@@ -219,6 +219,15 @@ static const UINT WM_FL_LOCK_ALL = WM_APP + 1;
 // so close detection is deferred to the normal message loop where it works.
 static const UINT WM_FL_CHECK_CLOSE = WM_APP + 2;
 
+// WM_FL_CLEAR_RO — thread message posted by the NPPN_READONLYCHANGED handler.
+// NPPN_READONLYCHANGED fires from INSIDE Notepad++'s buf->setReadOnly(true) call.
+// Calling NPPM_SETBUFFERREADONLY from within that notification fires re-entrantly,
+// and Notepad++ overrides it when the outer buf->setReadOnly(true) resumes.
+// Posting this message defers the NPPM_SETBUFFERREADONLY call to the normal
+// message loop, after the entire buf->setReadOnly(true) call stack has unwound.
+// wParam = buffer ID (uptr_t cast to WPARAM).
+static const UINT WM_FL_CLEAR_RO = WM_APP + 3;
+
 // SCI_SETREADONLY and SCI_GETREADONLY are now defined in the full Scintilla.h.
 
 // g_log — in-memory event log shown by Show Lock Status.
@@ -1093,6 +1102,39 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                     for (const auto& op : openPaths)
                         if (op == *it) { found = true; break; }
                     it = found ? ++it : g_foreignOpenPaths.erase(it);
+                }
+            }
+        }
+
+        // Deferred read-only clear.  Posted by NPPN_READONLYCHANGED because
+        // calling NPPM_SETBUFFERREADONLY from inside the notification is re-entrant:
+        // Notepad++ overrides it when buf->setReadOnly(true) resumes after the
+        // handler returns.  Here we are in the normal message loop, fully unwound.
+        // wParam = buffer ID to clear.
+        if (msg->hwnd == nullptr && msg->message == WM_FL_CLEAR_RO)
+        {
+            uptr_t roBufferId = static_cast<uptr_t>(msg->wParam);
+            if (g_addReadOnly && roBufferId)
+            {
+                std::wstring path;
+                auto it = g_idToPath.find(roBufferId);
+                if (it != g_idToPath.end()) path = it->second;
+                else path = getCurrentFilePath();
+
+                if (!path.empty() && g_pendingRestorePaths.count(path))
+                {
+                    // Belt: NPPM_SETBUFFERREADONLY clears both buffer._isReadOnly
+                    // and pdoc (works here because we are outside any re-entrancy).
+                    LRESULT r1 = ::SendMessage(g_nppData._nppHandle,
+                                               NPPM_SETBUFFERREADONLY,
+                                               static_cast<WPARAM>(roBufferId),
+                                               static_cast<LPARAM>(FALSE));
+                    // Suspenders: SCI_SETREADONLY 0 clears pdoc directly, in case
+                    // the message code for NPPM_SETBUFFERREADONLY is estimated wrong.
+                    ::SendMessage(g_nppData._scintillaMainHandle,   SCI_SETREADONLY, 0, 0);
+                    ::SendMessage(g_nppData._scintillaSecondHandle, SCI_SETREADONLY, 0, 0);
+                    log(L"WM_FL_CLEAR_RO: bufferId=%llu  NPPM_SETBUFFERREADONLY=%d  SCI_SETREADONLY 0 applied",
+                        static_cast<unsigned long long>(roBufferId), static_cast<int>(r1));
                 }
             }
         }
@@ -2226,26 +2268,43 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
 
         case NPPN_READONLYCHANGED:
         {
-            // Fires when a buffer's Document Read Only state changes.
-            // If this notification works in this build, it gives us the simplest
-            // possible fix: Notepad++ just set the buffer read-only → we immediately
-            // set it back to writable via NPPM_SETBUFFERREADONLY.
-            // The lParam contains the new state; we only act when it became read-only.
-            // nmhdr.idFrom = buffer ID (same as NPPM_SETBUFFERREADONLY wParam).
-            log(L"NPPN_READONLYCHANGED fired: bufferId=%llu",
-                static_cast<unsigned long long>(bufferId));
-            if (g_addReadOnly && !g_pendingRestorePaths.empty())
+            // For NPPN_READONLYCHANGED, the Notepad++ API puts the real buffer ID
+            // in nmhdr.hwndFrom and the DOCSTATUS_* flags in nmhdr.idFrom.
+            // The global 'bufferId' (from idFrom) is DOCSTATUS_READONLY=1, not a
+            // buffer ID — use hwndFrom instead.
+            uptr_t roBufferId = reinterpret_cast<uptr_t>(notifyCode->nmhdr.hwndFrom);
+            UINT   docStatus  = static_cast<UINT>(notifyCode->nmhdr.idFrom);
+            log(L"NPPN_READONLYCHANGED fired: realBufferId=%llu  docStatus=%u",
+                static_cast<unsigned long long>(roBufferId), docStatus);
+
+            // Only act when the buffer just became read-only (DOCSTATUS_READONLY=1).
+            // When it became writable we don't need to do anything.
+            if (!(docStatus & DOCSTATUS_READONLY)) break;
+
+            if (g_addReadOnly)
             {
-                // Check that this is a managed file before clearing
-                std::wstring path = getCurrentFilePath();
+                // Resolve path via g_idToPath rather than getCurrentFilePath(),
+                // because 50-100ms may have passed since the attribute was set.
+                std::wstring path;
+                auto it = g_idToPath.find(roBufferId);
+                if (it != g_idToPath.end())
+                    path = it->second;
+                else
+                    path = getCurrentFilePath();
+
                 if (!path.empty() && g_pendingRestorePaths.count(path))
                 {
-                    LRESULT res = ::SendMessage(g_nppData._nppHandle,
-                                                NPPM_SETBUFFERREADONLY,
-                                                static_cast<WPARAM>(bufferId),
-                                                static_cast<LPARAM>(FALSE));
-                    log(L"NPPN_READONLYCHANGED: NPPM_SETBUFFERREADONLY(%llu,FALSE)=%d",
-                        static_cast<unsigned long long>(bufferId), static_cast<int>(res));
+                    // Do NOT call NPPM_SETBUFFERREADONLY here directly.
+                    // This notification fires from inside Notepad++'s
+                    // buf->setReadOnly(true) call.  A re-entrant
+                    // NPPM_SETBUFFERREADONLY call gets overridden when the
+                    // outer buf->setReadOnly(true) resumes after our handler
+                    // returns.  Post to the normal message loop instead.
+                    log(L"NPPN_READONLYCHANGED: posting WM_FL_CLEAR_RO for bufferId=%llu",
+                        static_cast<unsigned long long>(roBufferId));
+                    ::PostThreadMessageW(::GetCurrentThreadId(),
+                                         WM_FL_CLEAR_RO,
+                                         static_cast<WPARAM>(roBufferId), 0);
                 }
             }
             break;
