@@ -61,11 +61,15 @@
 //  [1]   (separator)                  Empty name → Notepad++ renders a line
 //  [2]   Lock Current File            Manually locks the active tab
 //  [3]   Unlock Current File          Manually releases the active tab's lock
-//  [4]   Show Lock Status             Message box listing all locked files
-//  [5]   (separator)                  Empty name → Notepad++ renders a line
-//  [6]   Add Read-only                Toggles FILE_ATTRIBUTE_READONLY on locked files
-//  [7]   (separator)                  Empty name → Notepad++ renders a line
-//  [8]   Remember Options             Persists g_lockingEnabled + g_addReadOnly to registry
+//  [4]   (separator)                  Empty name → Notepad++ renders a line
+//  [5]   Show Status                  Message box listing all locked files
+//  [6]   (separator)                  Empty name → Notepad++ renders a line
+//  [7]   Add Read-only                Toggles FILE_ATTRIBUTE_READONLY on locked files
+//  [8]   (separator)                  Empty name → Notepad++ renders a line
+//  [9]   Remember Options             Persists g_lockingEnabled + g_addReadOnly to registry
+// [10]   (separator)                  Empty name → Notepad++ renders a line
+// [11]   Enable Logging               Toggles diagnostic event logging
+// [12]   Show Log                     Displays captured events and live state
 //
 // NOTEPAD++ MESSAGE USAGE
 // ───────────────────────
@@ -106,6 +110,11 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 1 – Plugin-wide state
 // ═══════════════════════════════════════════════════════════════════════════
+
+// g_hDllInstance
+//   HINSTANCE of this DLL, captured in DllMain.  Required by RegisterClassExW
+//   and CreateWindowEx for the log dialog window class.
+static HINSTANCE g_hDllInstance = nullptr;
 
 // g_nppData
 //   Holds the Notepad++ window handles supplied by setInfo() at load time.
@@ -230,14 +239,21 @@ static const UINT WM_FL_CLEAR_RO = WM_APP + 3;
 
 // SCI_SETREADONLY and SCI_GETREADONLY are now defined in the full Scintilla.h.
 
-// g_log — in-memory event log shown by Show Lock Status.
+// g_loggingEnabled
+//   When true, log() writes timestamped entries to g_log and OutputDebugStringW.
+//   When false, log() is a no-op.  The value is persisted in the registry
+//   independently of g_rememberOptions so it survives restarts unconditionally.
+static bool g_loggingEnabled = false;
+
+// g_log — in-memory event log shown by Show Log.
 // Accumulates timestamped entries from key points in the hook chain.
-// Capped at 60 lines so the dialog stays readable.
+// Capped at 200 entries.  Cleared when logging is toggled on.
 static std::vector<std::wstring> g_log;
 static DWORD g_logBase = 0;   // GetTickCount() at first log entry
 
 static void log(const wchar_t* fmt, ...)
 {
+    if (!g_loggingEnabled) return;
     if (g_log.size() >= 200) return;
 
     wchar_t buf[512];
@@ -400,6 +416,30 @@ static void loadSettings()
             && type == REG_DWORD)
             g_addReadOnly = (v != 0);
     }
+    // LoggingEnabled is always loaded regardless of g_rememberOptions.
+    v = 0; size = sizeof(DWORD);
+    if (::RegQueryValueExW(hKey, L"LoggingEnabled", nullptr, &type,
+                           reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
+        && type == REG_DWORD)
+        g_loggingEnabled = (v != 0);
+    ::RegCloseKey(hKey);
+}
+
+// ── saveLoggingRegistry ───────────────────────────────────────────────────────
+//
+// Persists only g_loggingEnabled to the registry.  Called from toggleLogging()
+// so the logging state survives restarts without requiring "Remember Options".
+// ─────────────────────────────────────────────────────────────────────────────
+static void saveLoggingRegistry()
+{
+    HKEY hKey = nullptr;
+    if (::RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, nullptr,
+                          REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr,
+                          &hKey, nullptr) != ERROR_SUCCESS)
+        return;
+    DWORD v = g_loggingEnabled ? 1 : 0;
+    ::RegSetValueExW(hKey, L"LoggingEnabled", 0, REG_DWORD,
+                     reinterpret_cast<const BYTE*>(&v), sizeof(v));
     ::RegCloseKey(hKey);
 }
 
@@ -999,7 +1039,7 @@ static LRESULT CALLBACK cmdHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 // file was originally writable).  Files that were read-only before being opened
 // are not in g_pendingRestorePaths and are therefore unaffected.
 // ─────────────────────────────────────────────────────────────────────────────
-// Diagnostic counters for sciSubclassProc — shown in Show Lock Status.
+// Diagnostic counters for sciSubclassProc — shown in Show Log.
 static int g_subclassCallCount      = 0;  // total SCI_SETREADONLY calls seen
 static int g_subclassInterceptCount = 0;  // times we changed 1 → 0
 
@@ -1489,30 +1529,50 @@ void commandMenuInit()
     funcItem[3]._init2Check = false;
     funcItem[3]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[4]._itemName, _T("Show Lock Status"));
-    funcItem[4]._pFunc      = showLockStatus;
+    ::lstrcpy(funcItem[4]._itemName, _T(""));
+    funcItem[4]._pFunc      = nullptr;
     funcItem[4]._init2Check = false;
     funcItem[4]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[5]._itemName, _T(""));
-    funcItem[5]._pFunc      = nullptr;
+    ::lstrcpy(funcItem[5]._itemName, _T("Show Status"));
+    funcItem[5]._pFunc      = showLockStatus;
     funcItem[5]._init2Check = false;
     funcItem[5]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[6]._itemName, _T("Add Read-only"));
-    funcItem[6]._pFunc      = toggleAddReadOnly;
-    funcItem[6]._init2Check = g_addReadOnly;
+    ::lstrcpy(funcItem[6]._itemName, _T(""));
+    funcItem[6]._pFunc      = nullptr;
+    funcItem[6]._init2Check = false;
     funcItem[6]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[7]._itemName, _T(""));
-    funcItem[7]._pFunc      = nullptr;
-    funcItem[7]._init2Check = false;
+    ::lstrcpy(funcItem[7]._itemName, _T("Add Read-only"));
+    funcItem[7]._pFunc      = toggleAddReadOnly;
+    funcItem[7]._init2Check = g_addReadOnly;
     funcItem[7]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[8]._itemName, _T("Remember Options"));
-    funcItem[8]._pFunc      = toggleRememberOptions;
-    funcItem[8]._init2Check = g_rememberOptions;
+    ::lstrcpy(funcItem[8]._itemName, _T(""));
+    funcItem[8]._pFunc      = nullptr;
+    funcItem[8]._init2Check = false;
     funcItem[8]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[9]._itemName, _T("Remember Options"));
+    funcItem[9]._pFunc      = toggleRememberOptions;
+    funcItem[9]._init2Check = g_rememberOptions;
+    funcItem[9]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[10]._itemName, _T(""));
+    funcItem[10]._pFunc      = nullptr;
+    funcItem[10]._init2Check = false;
+    funcItem[10]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[11]._itemName, _T("Enable Logging"));
+    funcItem[11]._pFunc      = toggleLogging;
+    funcItem[11]._init2Check = g_loggingEnabled;
+    funcItem[11]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[12]._itemName, _T("Show Log"));
+    funcItem[12]._pFunc      = showLog;
+    funcItem[12]._init2Check = false;
+    funcItem[12]._pShKey     = nullptr;
 }
 
 // ── commandMenuCleanUp ───────────────────────────────────────────────────────
@@ -1729,38 +1789,169 @@ void unlockCurrentFile()
 
 // ── showLockStatus ───────────────────────────────────────────────────────────
 //
-// Builds a human-readable summary of the current lock state and shows it in
-// a message box.
+// Shows a concise summary of the current lock state: which files are locked,
+// whether automatic locking is on, and current option settings.
+// Diagnostic detail is available via Show Log.
 // ─────────────────────────────────────────────────────────────────────────────
 void showLockStatus()
 {
-    if (g_lockMap.empty())
-    {
-        const wchar_t* msg = g_lockingEnabled
-            ? L"Automatic locking is ENABLED.\r\nNo files are locked yet\r\n"
-              L"(lock takes effect when you open a file)."
-            : L"File locking is DISABLED.\r\nNo files are currently locked.";
+    std::wstringstream ss;
+    ss << L"Automatic locking: " << (g_lockingEnabled ? L"ON" : L"OFF") << L"\r\n";
+    ss << L"Add Read-only:     " << (g_addReadOnly    ? L"ON" : L"OFF") << L"\r\n";
+    ss << L"Logging:           " << (g_loggingEnabled ? L"ON" : L"OFF") << L"\r\n";
 
-        ::MessageBoxW(g_nppData._nppHandle,
-            msg, L"FileLock – Status", MB_OK | MB_ICONINFORMATION);
-        return;
+    // Locked files — all files with an active Win32 lock handle
+    ss << L"\r\nLocked files (" << g_lockMap.size() << L"):\r\n";
+    if (g_lockMap.empty())
+        ss << L"  (none)\r\n";
+    else
+        for (const auto& kv : g_lockMap)
+            ss << L"  \x2022 " << kv.first << L"\r\n";
+
+    // Read-only files — files whose FILE_ATTRIBUTE_READONLY was already set
+    // before the plugin touched them; we track but do not change their attribute.
+    {
+        std::vector<std::wstring> roFiles;
+        for (const auto& kv : g_readOnlyOriginals)
+            if (kv.second & FILE_ATTRIBUTE_READONLY)
+                roFiles.push_back(kv.first);
+        ss << L"\r\nRead-only files (" << roFiles.size() << L"):\r\n";
+        if (roFiles.empty())
+            ss << L"  (none)\r\n";
+        else
+            for (const auto& p : roFiles)
+                ss << L"  \x2022 " << p << L"\r\n";
     }
 
-    std::wstringstream ss;
-    ss << L"Locked files (" << g_lockMap.size() << L"):\r\n\r\n";
-    for (const auto& kv : g_lockMap)
-        ss << L"  \x2022 " << kv.first << L"\r\n";
-    ss << L"\r\nAutomatic locking: " << (g_lockingEnabled ? L"ON" : L"OFF");
-
-    // ── Event log (since startup) ─────────────────────────────────────────
-    ss << L"\r\n\r\n─── Event log ───\r\n";
-    if (g_log.empty())
-        ss << L"  (no events recorded yet)\r\n";
+    // Pseudo Read-only files — originally writable files on which this plugin
+    // has set FILE_ATTRIBUTE_READONLY; attribute is restored on unlock.
+    ss << L"\r\nPseudo Read-only files (" << g_pendingRestorePaths.size() << L"):\r\n";
+    if (g_pendingRestorePaths.empty())
+        ss << L"  (none)\r\n";
     else
-        for (const auto& line : g_log)
-            ss << L"  " << line << L"\r\n";
+        for (const auto& p : g_pendingRestorePaths)
+            ss << L"  \x2022 " << p << L"\r\n";
 
-    // ── Live state ───────────────────────────────────────────────────────
+    if (!g_foreignOpenPaths.empty())
+    {
+        ss << L"\r\nFiles skipped — open in another process ("
+           << g_foreignOpenPaths.size() << L"):\r\n";
+        for (const auto& p : g_foreignOpenPaths)
+            ss << L"  \x2022 " << p << L"\r\n";
+    }
+
+    ::MessageBoxW(g_nppData._nppHandle,
+        ss.str().c_str(), L"FileLock \x2013 Status", MB_OK | MB_ICONINFORMATION);
+}
+
+// ── Log dialog window procedure ───────────────────────────────────────────────
+//
+// Backs the scrollable log window shown by showLog().  The window contains a
+// full-client multiline read-only EDIT control (with both scrollbars) and a
+// centred OK button at the bottom.  The window is resizable so the user can
+// expand it if needed.
+// ─────────────────────────────────────────────────────────────────────────────
+static const int IDC_LOG_EDIT = 101;
+static const int IDC_LOG_OK   = 102;
+
+static const wchar_t* g_logWndText   = nullptr; // set before CreateWindowEx
+static bool           g_logWndClosed = false;
+static HFONT          g_hLogFont     = nullptr;
+
+static LRESULT CALLBACK logWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    static const int BTN_H = 28, BTN_W = 80, MARGIN = 8;
+
+    switch (msg)
+    {
+    case WM_CREATE:
+    {
+        RECT rc;
+        ::GetClientRect(hwnd, &rc);
+        HINSTANCE hi = reinterpret_cast<HINSTANCE>(
+            ::GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+
+        HWND hEdit = ::CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+            ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_AUTOHSCROLL,
+            MARGIN, MARGIN,
+            rc.right  - 2 * MARGIN,
+            rc.bottom - BTN_H - 3 * MARGIN,
+            hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_LOG_EDIT)), hi, nullptr);
+
+        ::SendMessageW(hEdit, EM_SETLIMITTEXT, 0, 0); // remove 32 KB cap
+
+        g_hLogFont = ::CreateFontW(
+            -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+        if (g_hLogFont)
+            ::SendMessageW(hEdit, WM_SETFONT,
+                           reinterpret_cast<WPARAM>(g_hLogFont), FALSE);
+
+        if (g_logWndText)
+            ::SetWindowTextW(hEdit, g_logWndText);
+
+        ::CreateWindowExW(
+            0, L"BUTTON", L"OK",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+            (rc.right - BTN_W) / 2, rc.bottom - BTN_H - MARGIN, BTN_W, BTN_H,
+            hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_LOG_OK)), hi, nullptr);
+
+        return 0;
+    }
+
+    case WM_SIZE:
+    {
+        RECT rc;
+        ::GetClientRect(hwnd, &rc);
+        HWND hEdit = ::GetDlgItem(hwnd, IDC_LOG_EDIT);
+        HWND hBtn  = ::GetDlgItem(hwnd, IDC_LOG_OK);
+        if (hEdit)
+            ::SetWindowPos(hEdit, nullptr,
+                MARGIN, MARGIN,
+                rc.right  - 2 * MARGIN,
+                rc.bottom - BTN_H - 3 * MARGIN,
+                SWP_NOZORDER);
+        if (hBtn)
+            ::SetWindowPos(hBtn, nullptr,
+                (rc.right - BTN_W) / 2, rc.bottom - BTN_H - MARGIN,
+                BTN_W, BTN_H, SWP_NOZORDER);
+        return 0;
+    }
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDC_LOG_OK || LOWORD(wParam) == IDCANCEL)
+            ::DestroyWindow(hwnd);
+        return 0;
+
+    case WM_CLOSE:
+        ::DestroyWindow(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        if (g_hLogFont) { ::DeleteObject(g_hLogFont); g_hLogFont = nullptr; }
+        g_logWndClosed = true;
+        return 0;
+    }
+    return ::DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// ── showLog ──────────────────────────────────────────────────────────────────
+//
+// Displays the in-memory event log and a snapshot of live diagnostic state
+// in a scrollable, resizable window.  The window is sized to 80% of the
+// screen working area height so it never goes off-screen.
+// Enable logging first via "Enable Logging" in the plugin menu.
+// ─────────────────────────────────────────────────────────────────────────────
+void showLog()
+{
+    std::wstringstream ss;
+
+    ss << L"Logging: " << (g_loggingEnabled ? L"ENABLED" : L"DISABLED") << L"\r\n";
+
+    // ── Live Scintilla state ──────────────────────────────────────────────
     ss << L"\r\n─── Live state ───\r\n";
     LRESULT roMain = ::SendMessage(g_nppData._scintillaMainHandle,
                                    SCI_GETREADONLY, 0, 0);
@@ -1769,128 +1960,121 @@ void showLockStatus()
     ss << L"SCI_GETREADONLY  main=" << roMain << L"  second=" << roSec
        << L"  (0=editable, 1=read-only)\r\n";
 
-    // sciSubclassProc counters — confirm subclass is installed and intercepting
     ss << L"sciSubclassProc: SCI_SETREADONLY calls seen=" << g_subclassCallCount
-       << L"  intercepted(1→0)=" << g_subclassInterceptCount << L"\r\n";
+       << L"  intercepted(1\x2192""0)=" << g_subclassInterceptCount << L"\r\n";
 
-    // Scintilla handle validity
     ss << L"Scintilla handles  main="
        << (g_nppData._scintillaMainHandle ? L"valid" : L"NULL")
        << L"  second="
        << (g_nppData._scintillaSecondHandle ? L"valid" : L"NULL") << L"\r\n";
 
-    // g_readOnlyOriginals — what we track as "originally writable"
+    // ── Attribute tracking tables ─────────────────────────────────────────
     ss << L"\r\ng_readOnlyOriginals (" << g_readOnlyOriginals.size() << L"):\r\n";
     for (const auto& kv : g_readOnlyOriginals)
     {
         bool origRO = (kv.second & FILE_ATTRIBUTE_READONLY) != 0;
         ss << L"  " << kv.first
-           << (origRO ? L"  [originally RO — NOT overriding Scintilla]"
-                       : L"  [originally writable — weOwn=true]")
+           << (origRO ? L"  [originally RO]" : L"  [originally writable — weOwn=true]")
            << L"\r\n";
     }
 
-    // g_pendingRestorePaths — crash recovery registry list
     ss << L"\r\ng_pendingRestorePaths (" << g_pendingRestorePaths.size() << L"):\r\n";
     for (const auto& p : g_pendingRestorePaths)
         ss << L"  " << p << L"\r\n";
 
-    // Force SCI_SETREADONLY 0 right now and re-check (Phase 1)
+    // ── Scintilla writability test ────────────────────────────────────────
     ::SendMessage(g_nppData._scintillaMainHandle, SCI_SETREADONLY, 0, 0);
     LRESULT roForced = ::SendMessage(g_nppData._scintillaMainHandle,
                                      SCI_GETREADONLY, 0, 0);
-    ss << L"\r\nAfter forcing SCI_SETREADONLY 0  →  SCI_GETREADONLY=" << roForced << L"\r\n";
+    ss << L"\r\nAfter SCI_SETREADONLY 0: SCI_GETREADONLY=" << roForced << L"\r\n";
 
-    // IMMEDIATE insert test — no dialog in between, no WM_ACTIVATE, no Notepad++ callbacks.
-    // If this fails, the document-level readonly is separate from the API-level flag:
-    // SCI_SETREADONLY only sets the editor view's flag, not pdoc->readonly.
-    // If this succeeds, the issue is purely timing (Notepad++ re-applies after WM_ACTIVATE).
-    LRESULT lenImm0 = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0); // SCI_GETLENGTH
+    LRESULT lenBefore = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0);
     const char testCh = ' ';
     ::SendMessage(g_nppData._scintillaMainHandle, 2001, 1,
-                  reinterpret_cast<LPARAM>(&testCh));                              // SCI_ADDTEXT
-    LRESULT lenImm1 = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0);
-    bool immOk = (lenImm1 == lenImm0 + 1);
+                  reinterpret_cast<LPARAM>(&testCh));
+    LRESULT lenAfter = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0);
+    bool immOk = (lenAfter == lenBefore + 1);
     if (immOk)
-        ::SendMessage(g_nppData._scintillaMainHandle, 2279, 0, 0);                // SCI_UNDO
+        ::SendMessage(g_nppData._scintillaMainHandle, 2279, 0, 0);
 
-    ss << L"IMMEDIATE SCI_ADDTEXT right after SETREADONLY 0: "
-       << (immOk ? L"SUCCEEDED" : L"FAILED")
-       << L"  (lenBefore=" << lenImm0 << L"  lenAfter=" << lenImm1 << L")\r\n";
-
+    ss << L"SCI_ADDTEXT test: " << (immOk ? L"SUCCEEDED" : L"FAILED")
+       << L"  (lenBefore=" << lenBefore << L"  lenAfter=" << lenAfter << L")\r\n";
     if (immOk)
-        ss << L"  → SCI_SETREADONLY affects pdoc correctly; re-apply is a timing issue.\r\n";
+        ss << L"  \x2192 Scintilla is fully writable.\r\n";
     else
-        ss << L"  → SCI_SETREADONLY does NOT clear pdoc->readonly — two separate flags.\r\n"
-              L"    SCI_GETREADONLY=0 is the view flag only; document remains locked.\r\n";
+        ss << L"  \x2192 Scintilla refused insertion — pdoc->readonly may still be set.\r\n";
 
-    dbg(L"FL: showLockStatus  roMain=%d  immOk=%d  lb=%d  la=%d  originals=%zu\n",
-        (int)roMain, (int)immOk, (int)lenImm0, (int)lenImm1,
-        g_readOnlyOriginals.size());
+    // ── Event log (last) ─────────────────────────────────────────────────
+    ss << L"\r\n─── Event log (" << g_log.size() << L" entries) ───\r\n";
+    if (!g_loggingEnabled)
+        ss << L"  Enable logging from the menu to start capturing events.\r\n";
+    else if (g_log.empty())
+        ss << L"  (no events recorded yet)\r\n";
+    else
+        for (const auto& line : g_log)
+            ss << L"  " << line << L"\r\n";
 
-    // Phase 1 dialog — show everything above
-    ss << L"\r\nClick OK — a second dialog will check the state AFTER WM_ACTIVATE fires.";
-    ::MessageBoxW(g_nppData._nppHandle,
-        ss.str().c_str(), L"FileLock \x2013 Status (1/2)", MB_OK | MB_ICONINFORMATION);
-
-    // ── Phase 2: check state after WM_ACTIVATE has fired ─────────────────────
-    // After the first dialog closed, Notepad++ received WM_ACTIVATE / WM_SETFOCUS.
-    // If something re-applied SCI_SETREADONLY 1 during that sequence, it shows here.
-    LRESULT roAfterActivate = ::SendMessage(g_nppData._scintillaMainHandle,
-                                            SCI_GETREADONLY, 0, 0);
-
-    // Test: can Scintilla accept a programmatic text insertion right now?
-    // Uses correct Scintilla message IDs:
-    //   SCI_GETLENGTH  = 2006  (byte length of document)
-    //   SCI_ADDTEXT    = 2001  (append bytes at current position)
-    //   SCI_UNDO       = 2279
-    bool insertWorked = false;
-    if (roAfterActivate == 0)
+    // ── Register window class (once per process) ──────────────────────────
+    static bool s_classReg = false;
+    if (!s_classReg)
     {
-        LRESULT lenBefore = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0);
-        const char space = ' ';
-        ::SendMessage(g_nppData._scintillaMainHandle, 2001,
-                      1, reinterpret_cast<LPARAM>(&space));
-        LRESULT lenAfter = ::SendMessage(g_nppData._scintillaMainHandle, 2006, 0, 0);
-        insertWorked = (lenAfter == lenBefore + 1);
-        dbg(L"FL: insert test  lenBefore=%d  lenAfter=%d  worked=%d\n",
-            (int)lenBefore, (int)lenAfter, (int)insertWorked);
-        if (insertWorked)
-            ::SendMessage(g_nppData._scintillaMainHandle, 2279, 0, 0); // SCI_UNDO
-        else
-            dbg(L"FL: insert FAILED — length unchanged despite SCI_GETREADONLY=0\n");
+        WNDCLASSEXW wc    = {};
+        wc.cbSize         = sizeof(wc);
+        wc.lpfnWndProc    = logWndProc;
+        wc.hInstance      = g_hDllInstance;
+        wc.hbrBackground  = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        wc.hCursor        = ::LoadCursorW(nullptr, IDC_ARROW);
+        wc.lpszClassName  = L"FileLockLogWnd";
+        s_classReg = (::RegisterClassExW(&wc) != 0);
     }
 
-    std::wstringstream ss2;
-    ss2 << L"State AFTER WM_ACTIVATE\r\n\r\n"
-        << L"SCI_GETREADONLY = " << roAfterActivate
-        << L"  (0=editable, 1=read-only)\r\n\r\n";
+    // ── Size: 80% of working-area height; cap width at 900 px ────────────
+    RECT wa = {};
+    ::SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int wkW  = wa.right  - wa.left;
+    int wkH  = wa.bottom - wa.top;
+    int dlgH = wkH * 80 / 100;
+    int dlgW = min(900, wkW * 80 / 100);
+    int x    = wa.left + (wkW - dlgW) / 2;
+    int y    = wa.top  + (wkH - dlgH) / 2;
 
-    if (roAfterActivate == 0)
+    std::wstring content = ss.str();
+    g_logWndText   = content.c_str();
+    g_logWndClosed = false;
+
+    HWND hDlg = ::CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        L"FileLockLogWnd",
+        L"FileLock \x2013 Log",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
+        x, y, dlgW, dlgH,
+        g_nppData._nppHandle, nullptr, g_hDllInstance, nullptr);
+
+    if (!hDlg) return;
+
+    ::ShowWindow(hDlg, SW_SHOW);
+    ::UpdateWindow(hDlg);
+    ::EnableWindow(g_nppData._nppHandle, FALSE); // block input to Notepad++
+
+    // Run a modal message loop until the log window is closed.
+    // IsDialogMessageW handles Tab (edit → button), Enter (OK), Escape (cancel).
+    // If WM_QUIT arrives, re-post it so Notepad++'s own loop sees it on exit.
+    MSG msg = {};
+    while (!g_logWndClosed)
     {
-        ss2 << L"Programmatic insert test: "
-            << (insertWorked ? L"SUCCEEDED (Scintilla accepted the character)\r\n\r\n"
-                             : L"FAILED (Scintilla refused even though SCI_GETREADONLY=0)\r\n\r\n");
+        BOOL bRet = ::GetMessageW(&msg, nullptr, 0, 0);
+        if (bRet == 0) { ::PostQuitMessage(static_cast<int>(msg.wParam)); break; }
+        if (bRet < 0)  break;
+        if (!::IsDialogMessageW(hDlg, &msg))
+        {
+            ::TranslateMessage(&msg);
+            ::DispatchMessage(&msg);
+        }
     }
 
-    if (roAfterActivate == 1)
-        ss2 << L"SCI_SETREADONLY was re-applied to 1 after WM_ACTIVATE.\r\n"
-               L"The intercept in WH_CALLWNDPROCRET is not catching this call\r\n"
-               L"(Notepad++ may be using PostMessage, not SendMessage).\r\n";
-    else if (!insertWorked)
-        ss2 << L"Scintilla is in writable mode but cannot accept text.\r\n"
-               L"Notepad++ is blocking input above the Scintilla level\r\n"
-               L"(e.g. its internal buffer._isReadOnly flag).\r\n";
-    else
-        ss2 << L"Scintilla is fully writable and accepts insertions.\r\n"
-               L"If keyboard input still does not work, please click\r\n"
-               L"directly in the editor area and try typing now.\r\n";
-
-    dbg(L"FL: showLockStatus phase2  roAfterActivate=%d  insertWorked=%d\n",
-        (int)roAfterActivate, (int)insertWorked);
-
-    ::MessageBoxW(g_nppData._nppHandle,
-        ss2.str().c_str(), L"FileLock \x2013 Status (2/2)", MB_OK | MB_ICONINFORMATION);
+    ::EnableWindow(g_nppData._nppHandle, TRUE);
+    ::SetForegroundWindow(g_nppData._nppHandle);
+    g_logWndText = nullptr;
 }
 
 // ── toggleAddReadOnly ────────────────────────────────────────────────────────
@@ -1915,7 +2099,7 @@ void toggleAddReadOnly()
     {
         UINT checkFlag = g_addReadOnly ? MF_CHECKED : MF_UNCHECKED;
         ::CheckMenuItem(hMenu,
-                        static_cast<UINT>(funcItem[6]._cmdID),
+                        static_cast<UINT>(funcItem[7]._cmdID),
                         MF_BYCOMMAND | checkFlag);
     }
 
@@ -1972,11 +2156,40 @@ void toggleRememberOptions()
     {
         UINT checkFlag = g_rememberOptions ? MF_CHECKED : MF_UNCHECKED;
         ::CheckMenuItem(hMenu,
-                        static_cast<UINT>(funcItem[8]._cmdID),
+                        static_cast<UINT>(funcItem[9]._cmdID),
                         MF_BYCOMMAND | checkFlag);
     }
 
     saveSettings();
+}
+
+// ── toggleLogging ────────────────────────────────────────────────────────────
+//
+// Flips g_loggingEnabled.  When turned on, clears the old log and resets the
+// timestamp base so the new session starts fresh.  The state is written to the
+// registry unconditionally (independently of g_rememberOptions) so that the
+// logging preference survives Notepad++ restarts without needing "Remember Options".
+// ─────────────────────────────────────────────────────────────────────────────
+void toggleLogging()
+{
+    g_loggingEnabled = !g_loggingEnabled;
+
+    if (g_loggingEnabled)
+    {
+        g_log.clear();
+        g_logBase = 0;
+    }
+
+    HMENU hMenu = ::GetMenu(g_nppData._nppHandle);
+    if (hMenu != nullptr)
+    {
+        UINT checkFlag = g_loggingEnabled ? MF_CHECKED : MF_UNCHECKED;
+        ::CheckMenuItem(hMenu,
+                        static_cast<UINT>(funcItem[11]._cmdID),
+                        MF_BYCOMMAND | checkFlag);
+    }
+
+    saveLoggingRegistry();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2085,24 +2298,9 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
     switch (notifyCode->nmhdr.code)
     {
         case NPPN_READY:
-        {
-            // Install the title-bar hook now that the Notepad++ window is live.
-            DWORD tid = ::GetWindowThreadProcessId(g_nppData._nppHandle, nullptr);
-            if (!g_hTitleHook)
-                g_hTitleHook = ::SetWindowsHookEx(WH_CALLWNDPROCRET,
-                                                   titleBarHookProc, nullptr, tid);
-
-            // DIAGNOSTIC 1: confirm NPPN_READY fired and show hook result.
-            wchar_t msg[256];
-            ::_snwprintf_s(msg, _countof(msg), _TRUNCATE,
-                L"NPPN_READY fired.\n"
-                L"Thread ID: %lu\n"
-                L"Hook handle: %s",
-                tid,
-                g_hTitleHook ? L"non-NULL (installed OK)" : L"NULL (FAILED)");
-            ::MessageBoxW(g_nppData._nppHandle, msg, L"FileLock Diag 1", MB_OK);
+            // NPPN_READY does not fire in this Notepad++ build.
+            // All hooks are installed in setInfo() instead.
             break;
-        }
 
         case NPPN_FILEOPENED:
             // NPPN_FILEOPENED fires before the title bar reflects the new file,
@@ -2349,6 +2547,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID /*lpReserved*/)
     switch (dwReason)
     {
         case DLL_PROCESS_ATTACH:
+            g_hDllInstance = static_cast<HINSTANCE>(hModule);
             pluginInit(hModule);
             break;
 

@@ -56,9 +56,14 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 | *(separator)* | — |
 | **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
 | **Unlock Current File** | Releases the lock on the active tab's file without closing the tab. |
-| **Show Lock Status** | Message box listing every currently locked file and the on/off state. |
+| **Show Status** | Concise summary of the current state. Shows option settings (locking, Add Read-only, Logging) and three file lists: **Locked files**, **Read-only files**, and **Pseudo Read-only files** (see [*File categories in Show Status*](#file-categories-in-show-status)). |
 | *(separator)* | — |
 | **Add Read-only** | When enabled (✔), also sets `FILE_ATTRIBUTE_READONLY` on each locked file. See [*Add Read-only option*](#add-read-only-option) below. |
+| *(separator)* | — |
+| **Remember Options** | When enabled (✔), persists **Toggle File Locking** and **Add Read-only** states to the registry so they are restored after a restart. |
+| *(separator)* | — |
+| **Enable Logging** | When enabled (✔), captures timestamped diagnostic events to an in-memory log. Enabling clears any previous log and starts fresh. The on/off state is always saved to the registry (independently of **Remember Options**). See [*Diagnostics and logging*](#diagnostics-and-logging) below. |
+| **Show Log** | Displays the captured event log together with a live diagnostic snapshot: Scintilla read-only state, subclass intercept counters, attribute tracking tables, and a Scintilla writability test. |
 
 ---
 
@@ -110,6 +115,53 @@ overwriting a read-only file.
 - If Notepad++ crashes or is force-killed, the attribute may be left in the
   read-only state.  To recover, open File Explorer, right-click the file →
   Properties, and untick **Read-only**.
+
+---
+
+## File categories in Show Status
+
+**Show Status** lists files in three separate groups:
+
+| List | Which files appear here |
+| --- | --- |
+| **Locked files** | Every file for which the plugin holds an active Win32 lock handle (`CreateFile` with `FILE_SHARE_READ \| FILE_SHARE_WRITE`, no `FILE_SHARE_DELETE`). |
+| **Read-only files** | Files whose `FILE_ATTRIBUTE_READONLY` flag was already set on disk before the plugin opened them. The plugin tracks these but does **not** change their attribute — they remain read-only when unlocked. |
+| **Pseudo Read-only files** | Originally writable files on which the plugin has set `FILE_ATTRIBUTE_READONLY` via **Add Read-only**. The original (writable) attribute is restored automatically when the file is unlocked, locking is disabled, or Notepad++ shuts down. |
+
+A file can appear in **Locked files** and one of the read-only lists at the same time (when **Add Read-only** is enabled).  The two read-only lists are always shown; they will both be empty when **Add Read-only** is off.
+
+---
+
+## Diagnostics and logging
+
+The plugin includes an optional in-memory event log for diagnosing lock and
+read-only behaviour.  Logging is off by default and has zero overhead when
+disabled — all `log()` calls are no-ops.
+
+### Enabling logging
+
+Open **Plugins > ExclusiveFileLock > Enable Logging**.  A ✔ check-mark appears
+and the log is cleared so the new session starts from a clean slate.  The
+preference is stored in the registry unconditionally (independently of
+**Remember Options**), so the setting survives Notepad++ restarts.
+
+### Reading the log
+
+Open **Plugins > ExclusiveFileLock > Show Log** at any time.  The dialog shows:
+
+| Section | Content |
+| --- | --- |
+| **Event log** | Timestamped entries from key points in the hook chain: tab switches, lock acquisitions and releases, read-only changes, deferred message handling. Up to 200 entries are kept. |
+| **Live state** | Current `SCI_GETREADONLY` values for both Scintilla views, subclass intercept counters, and handle validity. |
+| **Attribute tracking tables** | Contents of `g_readOnlyOriginals` (original attributes before the plugin touched them) and `g_pendingRestorePaths` (files whose `FILE_ATTRIBUTE_READONLY` we set and must restore on unlock or crash recovery). |
+| **Scintilla writability test** | Forces `SCI_SETREADONLY 0` then attempts a programmatic `SCI_ADDTEXT` insertion to confirm the document is genuinely editable at the `pdoc` level, not just at the view flag level. |
+
+### When to use logging
+
+- Turn logging on before reproducing a problem (spurious unlocks, file
+  remaining read-only, etc.), then open **Show Log** immediately after.
+- Leave logging **off** during normal use — it adds per-event string formatting
+  overhead and accumulates memory for entries that are never needed.
 
 ---
 
