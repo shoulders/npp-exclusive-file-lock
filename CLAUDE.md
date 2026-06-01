@@ -36,6 +36,7 @@ All plugin logic lives in a single file: [src/PluginDefinition.cpp](src/PluginDe
 - `g_enumerating` — flag that suppresses hook side-effects during tab cycling
 - `g_preRenameLockedPaths` — paths unlocked for a pending rename
 - `g_renameOpDispatched` — set when `IDM_FILE_RENAME_EXEC` (22003) is dequeued
+- `g_preDeleteLockedPaths` — all paths unlocked for a pending "Move to Recycle Bin"
 
 **Event handling:** `beNotified()` handles `NPPN_BUFFERACTIVATED`, `NPPN_FILESAVED`, `NPPN_FILEBEFORECLOSE`, and `NPPN_SHUTDOWN`. However, many of these are unreliable — see the broken API section below.
 
@@ -47,6 +48,12 @@ All plugin logic lives in a single file: [src/PluginDefinition.cpp](src/PluginDe
 - `41017` (`IDM_FILE_RENAME`) — opens the rename dialog; all locks released here.
 - `22003` (`IDM_FILE_RENAME_EXEC`) — fires after dialog closes, just before `MoveFileExW`; sets `g_renameOpDispatched` and re-releases any accidentally re-locked files.
 `WM_ACTIVATE` fires between these two commands (when the dialog closes) — **do not re-lock on `WM_ACTIVATE`**, it fires before `MoveFileExW`. Cancel vs. success is resolved in the `WM_SETTEXT` handler: if a saved path is gone from disk → success (re-lock under new name); if all paths exist and `g_renameOpDispatched` is set → cancel (restore all locks).
+
+**Delete (Move to Recycle Bin) support:** Handled via two `WH_GETMESSAGE`-intercepted `WM_COMMAND` messages (determined empirically from the event log):
+
+- `41016` (`IDM_FILE_DELETE`) — opens the delete confirmation dialog; all locks released here. `unlockPath()` calls `restoreReadOnly()`, restoring `FILE_ATTRIBUTE_READONLY` to its original state before `SHFileOperationW` runs.
+- `22007` (`IDM_FILE_DELETE_EXEC`) — fires after the dialog closes, just before `SHFileOperationW`; sets `g_deleteOpDispatched` and re-releases any accidentally re-locked files.
+`WM_ACTIVATE` fires between these two commands (dialog closed) — **do not re-lock on `WM_ACTIVATE`**. Cancel vs. success is resolved in `WM_SETTEXT`: if a locked path is gone from disk → success (re-lock survivors); if all paths still exist and `g_deleteOpDispatched` is set → cancel (re-lock everything).
 
 **Tab enumeration:** To enumerate all open files (e.g., for "Lock All" or orphan-lock cleanup), the plugin cycles through tabs by sending `TCM_SETCURSEL` + `WM_NOTIFY(TCN_SELCHANGE)` to the tab bar HWND (found via `EnumChildWindows` looking for class `"TabBar"` or `"SysTabControl32"`), then reads the title bar after each switch. The `g_enumerating` flag prevents the hook from auto-locking or updating `prevTabCount` during this cycling. The original tab is restored afterward.
 

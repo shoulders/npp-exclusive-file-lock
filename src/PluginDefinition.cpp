@@ -206,6 +206,24 @@ static std::vector<std::wstring> g_preRenameLockedPaths;
 //     • All paths still exist          → rename cancelled  → restore all locks.
 static bool g_renameOpDispatched = false;
 
+// g_preDeleteLockedPaths
+//   All paths that were locked when IDM_FILE_DELETE (41016) was dequeued.
+//   Every lock is released immediately so whichever file Notepad++ moves to
+//   the recycle bin is not blocked by our handle (which omits FILE_SHARE_DELETE).
+//   Resolved on the next WM_SETTEXT in titleBarHookProc:
+//     • any path gone from disk → that file was deleted; re-lock the survivors
+//     • all paths still exist  → delete was cancelled; re-lock everything
+static std::vector<std::wstring> g_preDeleteLockedPaths;
+
+// g_deleteOpDispatched
+//   Set when WM_COMMAND IDM_FILE_DELETE_EXEC (22007) is dequeued.  This fires
+//   after the confirmation dialog closes (and after WM_ACTIVATE), just before
+//   Notepad++ calls SHFileOperationW.  Once set, the next WM_SETTEXT in
+//   titleBarHookProc resolves the outcome:
+//     • a locked path gone from disk → delete succeeded → re-lock survivors
+//     • all paths still exist        → delete cancelled → re-lock everything
+static bool g_deleteOpDispatched = false;
+
 // IDM_FILE_RENAME_EXEC — the WM_COMMAND ID that Notepad++ posts when it is
 // about to call MoveFileExW, fired after the rename dialog closes.
 // Determined empirically from the WM_COMMAND log (captured while files were locked).
@@ -214,6 +232,19 @@ static const UINT IDM_FILE_RENAME_EXEC = 22003;
 // IDM_FILE_RENAME — Notepad++ menu command ID for "Rename" (IDM_FILE + 17).
 // IDM_FILE = IDM + 1000 = 41000;  IDM_FILE_RENAME = 41000 + 17 = 41017.
 static const UINT IDM_FILE_RENAME = 41017;
+
+// IDM_FILE_DELETE — Notepad++ menu command ID for "Move to Recycle Bin" (IDM_FILE + 16).
+// IDM_FILE = 41000; IDM_FILE_DELETE = 41000 + 16 = 41016.
+// Determined empirically: the WM_COMMAND log showed 41016 when "Move to Recycle Bin"
+// was clicked, not 41018 (IDM_FILE + 18) which the Notepad++ source suggests.
+static const UINT IDM_FILE_DELETE = 41016;
+
+// IDM_FILE_DELETE_EXEC — the WM_COMMAND ID posted after the delete confirmation
+// dialog closes and just before Notepad++ calls SHFileOperationW.
+// Determined empirically (parallel to IDM_FILE_RENAME_EXEC = 22003).
+// WM_ACTIVATE fires between IDM_FILE_DELETE and IDM_FILE_DELETE_EXEC (when the
+// confirmation dialog closes) — do NOT re-lock on WM_ACTIVATE; wait for this ID.
+static const UINT IDM_FILE_DELETE_EXEC = 22007;
 
 // WM_FL_LOCK_ALL — thread message posted by titleBarHookProc when a remembered
 // locking state is detected at startup.  Processed by getMsgHookProc in the
@@ -290,13 +321,35 @@ static void dbg(const wchar_t* fmt, ...)
 static const UINT IDM_FILE_SAVE    = 41006;   // IDM_FILE + 6
 static const UINT IDM_FILE_SAVEALL = 41008;   // IDM_FILE + 8
 
-// NPPM_SETBUFFERREADONLY — not in the official plugin template header but exists
-// in the Notepad++ internal API.  Value = NPPMSG + 95 based on Notepad++ source.
-// wParam = BufferID, lParam = TRUE/FALSE.  Sets buffer._isReadOnly AND calls
-// pdoc->SetReadOnly(false) via Notepad++'s own code path.
-// NOTE: our previous value (2154 = old NOTEPADPLUS_USER + 106) was wrong — that
-// mapped to NPPM_GETCURRENTMACROSTATUS which just returned 0 (Idle).
-static const UINT NPPM_SETBUFFERREADONLY = NPPMSG + 95;  // 2024 + 95 = 2119
+// NPPM_SAVEFILE — saves the file at the given path (must be open in Notepad++).
+// wParam: 0, lParam: const wchar_t* full file path.
+// Returns TRUE on success, FALSE if the path is not open or the save fails.
+// Used to save a pseudo-read-only locked file: the hook clears FILE_ATTRIBUTE_READONLY,
+// calls NPPM_SAVEFILE to perform the actual write (bypassing Notepad++'s UI-level
+// read-only check on buffer._isReadOnly), then WM_SETTEXT restores the attribute.
+static const UINT NPPM_SAVEFILE_MSG = NPPMSG + 94;  // 2024 + 94 = 2118
+
+// g_saveInProgress — prevents the save hook from re-entering itself.
+static bool g_saveInProgress = false;
+
+// g_setReadOnlyCmdId — cached command ID for the Edit > Set Read-Only toggle.
+// Found lazily by scanning the Edit menu text.  0 = not yet searched / not found.
+static UINT g_setReadOnlyCmdId = 0;
+
+// g_clearReadOnlyCmdId — cached command ID for Edit > "Clear Read-Only Flag".
+// This is a separate, one-directional command: it only clears buffer._isReadOnly,
+// never sets it.  This is the correct command to call before a save because it
+// does not need direction-detection.
+// Example text scanned: "&Clear Read-Only Flag"
+static UINT g_clearReadOnlyCmdId = 0;
+
+// g_toggleInProgress / g_lastToggleDocStatus — the Set Read-Only command is a
+// toggle: it flips buffer._isReadOnly without knowing the current direction.
+// We capture the NPPN_READONLYCHANGED docStatus that fires synchronously during
+// the SendMessage call.  If docStatus has DOCSTATUS_READONLY set, we went the
+// wrong way (buffer was already writable) and must toggle again to correct it.
+static bool g_toggleInProgress   = false;
+static UINT g_lastToggleDocStatus = 0;
 
 // NPPN_READONLYCHANGED is now defined in the official header (NPPN_FIRST + 16 = 1016).
 // With the correct NPPN_FIRST = 1000, this notification may now fire reliably.
@@ -885,66 +938,210 @@ static std::vector<std::wstring> enumerateOpenFilePaths()
     return result;
 }
 
-// ── makeBufferEditable ────────────────────────────────────────────────────────
+// ── findSetReadOnlyCmdId ──────────────────────────────────────────────────────
 //
-// Calls NPPM_SETBUFFERREADONLY(bufferId, FALSE) to clear Notepad++'s internal
-// buffer._isReadOnly flag for the specified file.  Notepad++ processes this
-// via buf->setReadOnly(false) which also calls pdoc->SetReadOnly(false) —
-// the same direct C++ path that was setting pdoc=true, now clearing it.
+// Scans the Notepad++ Edit menu (and one level of submenus) for an item whose
+// text contains both "Read" and "Only" — i.e. the "Set Read-Only" toggle.
+// Returns its WM_COMMAND ID and caches it in g_setReadOnlyCmdId.
+// Returns 0 if the item cannot be found.
 //
-// Buffer IDs come from g_idToPath (populated by NPPN_BUFFERACTIVATED) which
-// stores the real internal IDs even though NPPM_GETCURRENTBUFFERID is broken.
+// This command is used to clear buffer._isReadOnly before a save: NPPM_SAVEFILE
+// and the standard IDM_FILE_SAVE both check buffer._isReadOnly internally and
+// refuse to write if it is true.  Toggling it false first lets the save proceed.
 // ─────────────────────────────────────────────────────────────────────────────
-// NPPM_GETCURRENTBUFFERID is defined in Notepad_plus_msgs.h.
-// With old (wrong) header base it was 2108; correct value is NPPMSG+60 = 2084.
+static UINT findSetReadOnlyCmdId()
+{
+    if (g_setReadOnlyCmdId) return g_setReadOnlyCmdId;
 
-static void makeBufferEditable(const std::wstring& path)
+    HMENU hMenu = ::GetMenu(g_nppData._nppHandle);
+    if (!hMenu) return 0;
+
+    int topCount = ::GetMenuItemCount(hMenu);
+    for (int i = 0; i < topCount; i++)
+    {
+        wchar_t topText[64] = {};
+        ::GetMenuStringW(hMenu, i, topText, _countof(topText), MF_BYPOSITION);
+        if (!::wcsstr(topText, L"Edit") && !::wcsstr(topText, L"edit")) continue;
+
+        HMENU hEditMenu = ::GetSubMenu(hMenu, i);
+        if (!hEditMenu) break;
+
+        int editCount = ::GetMenuItemCount(hEditMenu);
+        for (int j = 0; j < editCount; j++)
+        {
+            // Check direct items
+            UINT cmdId = ::GetMenuItemID(hEditMenu, j);
+            if (cmdId && cmdId != (UINT)-1)
+            {
+                wchar_t text[128] = {};
+                ::GetMenuStringW(hEditMenu, j, text, _countof(text), MF_BYPOSITION);
+                if (::wcsstr(text, L"Read") != nullptr && ::wcsstr(text, L"Only") != nullptr)
+                {
+                    g_setReadOnlyCmdId = cmdId;
+                    log(L"findSetReadOnlyCmdId: '%s' id=%u", text, cmdId);
+                    return cmdId;
+                }
+            }
+            // Check one level of submenu
+            HMENU hSub = ::GetSubMenu(hEditMenu, j);
+            if (!hSub) continue;
+            int subCount = ::GetMenuItemCount(hSub);
+            for (int k = 0; k < subCount; k++)
+            {
+                UINT sid = ::GetMenuItemID(hSub, k);
+                if (!sid || sid == (UINT)-1) continue;
+                wchar_t stext[128] = {};
+                ::GetMenuStringW(hSub, k, stext, _countof(stext), MF_BYPOSITION);
+                if (::wcsstr(stext, L"Read") != nullptr && ::wcsstr(stext, L"Only") != nullptr)
+                {
+                    g_setReadOnlyCmdId = sid;
+                    log(L"findSetReadOnlyCmdId (sub): '%s' id=%u", stext, sid);
+                    return sid;
+                }
+            }
+        }
+        break;  // found Edit menu, stop looking at top-level items
+    }
+
+    log(L"findSetReadOnlyCmdId: NOT FOUND in Edit menu");
+    return 0;
+}
+
+// ── findClearReadOnlyCmdId ────────────────────────────────────────────────────
+//
+// Scans the Notepad++ Edit menu for the item whose text contains "Clear" AND
+// either "Read" or "Only" — i.e. "Clear Read-Only Flag".
+// This is the directional opposite of "Set Read-Only": it only makes a buffer
+// writable, never makes it read-only.  Caches the result in g_clearReadOnlyCmdId.
+// Returns 0 if not found.
+// ─────────────────────────────────────────────────────────────────────────────
+static UINT findClearReadOnlyCmdId()
+{
+    if (g_clearReadOnlyCmdId) return g_clearReadOnlyCmdId;
+
+    HMENU hMenu = ::GetMenu(g_nppData._nppHandle);
+    if (!hMenu) return 0;
+
+    int topCount = ::GetMenuItemCount(hMenu);
+    for (int i = 0; i < topCount; i++)
+    {
+        wchar_t topText[64] = {};
+        ::GetMenuStringW(hMenu, i, topText, _countof(topText), MF_BYPOSITION);
+        if (!::wcsstr(topText, L"Edit") && !::wcsstr(topText, L"edit")) continue;
+
+        HMENU hEditMenu = ::GetSubMenu(hMenu, i);
+        if (!hEditMenu) break;
+
+        int editCount = ::GetMenuItemCount(hEditMenu);
+        for (int j = 0; j < editCount; j++)
+        {
+            // Check direct items
+            UINT cmdId = ::GetMenuItemID(hEditMenu, j);
+            if (cmdId && cmdId != (UINT)-1)
+            {
+                wchar_t text[128] = {};
+                ::GetMenuStringW(hEditMenu, j, text, _countof(text), MF_BYPOSITION);
+                if (::wcsstr(text, L"Clear") != nullptr
+                    && (::wcsstr(text, L"Read") != nullptr || ::wcsstr(text, L"Only") != nullptr))
+                {
+                    g_clearReadOnlyCmdId = cmdId;
+                    log(L"findClearReadOnlyCmdId: '%s' id=%u", text, cmdId);
+                    return cmdId;
+                }
+            }
+            // Check one level of submenu
+            HMENU hSub = ::GetSubMenu(hEditMenu, j);
+            if (!hSub) continue;
+            int subCount = ::GetMenuItemCount(hSub);
+            for (int k = 0; k < subCount; k++)
+            {
+                UINT sid = ::GetMenuItemID(hSub, k);
+                if (!sid || sid == (UINT)-1) continue;
+                wchar_t stext[128] = {};
+                ::GetMenuStringW(hSub, k, stext, _countof(stext), MF_BYPOSITION);
+                if (::wcsstr(stext, L"Clear") != nullptr
+                    && (::wcsstr(stext, L"Read") != nullptr || ::wcsstr(stext, L"Only") != nullptr))
+                {
+                    g_clearReadOnlyCmdId = sid;
+                    log(L"findClearReadOnlyCmdId (sub): '%s' id=%u", stext, sid);
+                    return sid;
+                }
+            }
+        }
+        break;  // found Edit menu
+    }
+
+    log(L"findClearReadOnlyCmdId: NOT FOUND in Edit menu");
+    return 0;
+}
+
+// ── ensureBufferWritable ──────────────────────────────────────────────────────
+//
+// Sends the Edit > Set Read-Only toggle and checks whether the toggle went in
+// the correct direction (buffer._isReadOnly → false).  If it went the wrong
+// way (buffer was already writable, so we accidentally made it read-only), a
+// second toggle corrects the state.
+//
+// NPPN_READONLYCHANGED fires synchronously inside SendMessage.  When
+// g_toggleInProgress is set, the handler captures docStatus rather than
+// posting WM_FL_CLEAR_RO, and sets g_lastToggleDocStatus.
+//
+// docStatus & DOCSTATUS_READONLY = 1 → buffer BECAME read-only (wrong direction)
+// docStatus & DOCSTATUS_READONLY = 0 → buffer BECAME writable (correct)
+//
+// Returns true if buffer ended up writable, false if the command was not found.
+// ─────────────────────────────────────────────────────────────────────────────
+static bool ensureBufferWritable()
+{
+    UINT roCmd = findSetReadOnlyCmdId();
+    if (!roCmd)
+    {
+        log(L"ensureBufferWritable: Set Read-Only command not found");
+        return false;
+    }
+
+    // First toggle — direction unknown.
+    g_toggleInProgress   = true;
+    g_lastToggleDocStatus = 0;
+    ::SendMessage(g_nppData._nppHandle, WM_COMMAND, MAKEWPARAM(roCmd, 0), 0);
+    g_toggleInProgress = false;
+
+    UINT result = g_lastToggleDocStatus;
+    g_lastToggleDocStatus = 0;
+
+    if (result & DOCSTATUS_READONLY)
+    {
+        // Wrong direction: buffer was already writable, we made it read-only.
+        // Send a second toggle to restore writable state.
+        ::SendMessage(g_nppData._nppHandle, WM_COMMAND, MAKEWPARAM(roCmd, 0), 0);
+        log(L"ensureBufferWritable: corrected direction (first docStatus=%u)", result);
+    }
+    else
+    {
+        log(L"ensureBufferWritable: buffer now writable (docStatus=%u)", result);
+    }
+    return true;
+}
+
+// ── clearSciReadOnly ──────────────────────────────────────────────────────────
+//
+// Sends SCI_SETREADONLY 0 to both Scintilla views to ensure pdoc->readonly is
+// false.  Called during tab switches and window activation to counter any
+// SCI_SETREADONLY 1 that slipped past sciSubclassProc.
+//
+// Note: there is no NPPM_SETBUFFERREADONLY in this Notepad++ API version.
+// Notepad++'s internal buffer._isReadOnly is not directly clearable via the
+// plugin API.  For saving, NPPM_SAVEFILE (NPPMSG+94) is used instead, which
+// bypasses the buffer._isReadOnly check entirely.
+// ─────────────────────────────────────────────────────────────────────────────
+static void clearSciReadOnly(const std::wstring& path)
 {
     if (!g_addReadOnly || path.empty()) return;
+    if (!g_pendingRestorePaths.count(path)) return;  // originally read-only: leave alone
 
-    // Attempt 1: reverse-lookup from g_idToPath (populated by NPPN_ notifications).
-    // In practice NPPN_BUFFERACTIVATED never fires in this build so this is
-    // usually empty — but keep it for correctness.
-    uptr_t bufferId = 0;
-    for (const auto& kv : g_idToPath)
-        if (kv.second == path) { bufferId = kv.first; break; }
-
-    // Attempt 2: fall back to NPPM_GETCURRENTBUFFERID.
-    // Documented as broken but NPPM_SETBUFFERREADONLY might still work on the
-    // current buffer context even with a stale ID.
-    if (!bufferId)
-    {
-        bufferId = static_cast<uptr_t>(
-            ::SendMessage(g_nppData._nppHandle, NPPM_GETCURRENTBUFFERID, 0, 0));
-        log(L"makeBufferEditable: using NPPM_GETCURRENTBUFFERID = %llu",
-            static_cast<unsigned long long>(bufferId));
-    }
-
-    if (!bufferId)
-    {
-        log(L"makeBufferEditable: no buffer ID available");
-        return;
-    }
-
-    // Only act on files WE set read-only (originally-writable files).
-    // Files that were already read-only before locking (not in g_pendingRestorePaths)
-    // should remain non-editable — Notepad++ correctly shows them as read-only.
-    if (!g_pendingRestorePaths.count(path))
-    {
-        log(L"makeBufferEditable: skipping '%s' (originally read-only)", path.c_str());
-        return;
-    }
-
-    // IMPORTANT: call this while FILE_ATTRIBUTE_READONLY is still CLEARED on disk.
-    // If the flag is set when Notepad++ processes NPPM_SETBUFFERREADONLY, it reads
-    // the disk and immediately resets buffer._isReadOnly=true.  The caller must
-    // restore FILE_ATTRIBUTE_READONLY AFTER this call, not before.
-    LRESULT res = ::SendMessage(g_nppData._nppHandle,
-                                NPPM_SETBUFFERREADONLY,
-                                static_cast<WPARAM>(bufferId),
-                                static_cast<LPARAM>(FALSE));
-    log(L"makeBufferEditable: NPPM_SETBUFFERREADONLY(%llu,FALSE) = %d",
-        static_cast<unsigned long long>(bufferId), static_cast<int>(res));
+    ::SendMessage(g_nppData._scintillaMainHandle,   SCI_SETREADONLY, 0, 0);
+    ::SendMessage(g_nppData._scintillaSecondHandle, SCI_SETREADONLY, 0, 0);
+    log(L"clearSciReadOnly: SCI_SETREADONLY 0 applied for '%s'", path.c_str());
 }
 
 // ── cmdHookProc ───────────────────────────────────────────────────────────────
@@ -966,6 +1163,16 @@ static LRESULT CALLBACK cmdHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     if (nCode == HC_ACTION && !g_enumerating)
     {
         const CWPSTRUCT* p = reinterpret_cast<const CWPSTRUCT*>(lParam);
+
+        // Log Notepad++ focus gain and loss for diagnostics.
+        if (p->hwnd == g_nppData._nppHandle && p->message == WM_ACTIVATE)
+        {
+            UINT activationState = LOWORD(p->wParam);
+            if (activationState == WA_INACTIVE)
+                log(L"FOCUS LOST: Notepad++ losing focus");
+            else
+                log(L"FOCUS GAINED: Notepad++ gaining focus (WA=%u)", activationState);
+        }
 
         // WM_ACTIVATE (WA_ACTIVE / WA_CLICKACTIVE) on the Notepad++ main window:
         // Notepad++ is about to gain focus.  Clear FILE_ATTRIBUTE_READONLY on all
@@ -1015,6 +1222,107 @@ static LRESULT CALLBACK cmdHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                     ::SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
             }
             log(L"WH_CALLWNDPROC WA_ACTIVE: cleared FILE_ATTRIBUTE_READONLY");
+        }
+
+        // WM_COMMAND IDM_FILE_SAVE / IDM_FILE_SAVEALL (Ctrl+S — sent message path).
+        // Strategy: buffer._isReadOnly=true blocks every save API including NPPM_SAVEFILE.
+        // Fix: (1) clear FILE_ATTRIBUTE_READONLY from disk, (2) send the Edit > Set
+        // Read-Only toggle to flip buffer._isReadOnly false, (3) let the original
+        // IDM_FILE_SAVE command proceed normally — Notepad++ will write the file.
+        // FILE_ATTRIBUTE_READONLY is restored by WM_SETTEXT after the write.
+        if (p->hwnd == g_nppData._nppHandle && p->message == WM_COMMAND)
+        {
+            UINT cmdId = LOWORD(p->wParam);
+
+            if ((cmdId == IDM_FILE_SAVE || cmdId == IDM_FILE_SAVEALL)
+                && !g_saveInProgress && g_addReadOnly && !g_readOnlyOriginals.empty())
+            {
+                log(L"cmdHookProc WM_COMMAND id=%u (sent/Ctrl+S) addRO=%d originals=%zu pending=%zu",
+                    cmdId, (int)g_addReadOnly, g_readOnlyOriginals.size(),
+                    g_pendingRestorePaths.size());
+
+                if (cmdId == IDM_FILE_SAVE)
+                {
+                    std::wstring path = getCurrentFilePath();
+                    log(L"cmdHookProc IDM_FILE_SAVE: path='%s' inOriginals=%d inPending=%d",
+                        path.empty() ? L"(empty)" : path.c_str(),
+                        (int)(path.empty() ? 0 : g_readOnlyOriginals.count(path)),
+                        (int)(path.empty() ? 0 : g_pendingRestorePaths.count(path)));
+
+                    if (!path.empty() && g_readOnlyOriginals.count(path)
+                        && g_pendingRestorePaths.count(path))
+                    {
+                        // Step 1: clear FILE_ATTRIBUTE_READONLY from disk so the OS
+                        // allows Notepad++ to open the file for GENERIC_WRITE.
+                        DWORD attrs = ::GetFileAttributesW(path.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
+                        {
+                            ::SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+                            g_saveClearedPaths.push_back(path);
+                            log(L"cmdHookProc IDM_FILE_SAVE: FILE_ATTRIBUTE_READONLY cleared (attrs was 0x%lX)", attrs);
+                        }
+                        else
+                        {
+                            // Already clear (e.g. WM_ACTIVATE cleared it) — still track for restore.
+                            g_saveClearedPaths.push_back(path);
+                            log(L"cmdHookProc IDM_FILE_SAVE: attrs=0x%lX  FILE_ATTRIBUTE_READONLY already clear", attrs);
+                        }
+
+                        // Step 2: clear buffer._isReadOnly using "Clear Read-Only Flag".
+                        // Notepad++ checks buffer._isReadOnly BEFORE attempting the write.
+                        // If it is true, the save is silently skipped and NPPN_FILESAVED
+                        // never fires.  The file monitor sets buffer._isReadOnly=true ~50ms
+                        // after we apply FILE_ATTRIBUTE_READONLY.  WM_FL_CLEAR_RO clears it
+                        // for the normal case, but as a safety net we also clear it here.
+                        // "Clear Read-Only Flag" is one-directional (only clears), unlike
+                        // "Set Read-Only" (42028) which is a toggle that can go either way.
+                        UINT clearCmd = findClearReadOnlyCmdId();
+                        if (clearCmd)
+                        {
+                            LRESULT cr = ::SendMessage(g_nppData._nppHandle,
+                                                       WM_COMMAND,
+                                                       MAKEWPARAM(clearCmd, 0), 0);
+                            log(L"cmdHookProc IDM_FILE_SAVE: ClearReadOnly cmd=%u result=%d  (buffer._isReadOnly cleared)",
+                                clearCmd, (int)cr);
+                        }
+                        else
+                        {
+                            log(L"cmdHookProc IDM_FILE_SAVE: ClearReadOnly cmd NOT FOUND — save may fail if buffer._isReadOnly=true");
+                        }
+
+                        // Step 3: return — let the original IDM_FILE_SAVE be processed.
+                        // With FILE_ATTRIBUTE_READONLY clear (step 1) AND buffer._isReadOnly
+                        // false (step 2), Notepad++ can write the file normally.
+                        // FILE_ATTRIBUTE_READONLY is restored by WM_SETTEXT after the
+                        // title bar updates (asterisk disappears post-save).
+                        log(L"cmdHookProc IDM_FILE_SAVE: both blockers cleared — letting original save proceed");
+                    }
+                }
+                else if (cmdId == IDM_FILE_SAVEALL)
+                {
+                    UINT roCmd = findSetReadOnlyCmdId();
+                    log(L"cmdHookProc IDM_FILE_SAVEALL: roCmd=%u pending=%zu",
+                        roCmd, g_pendingRestorePaths.size());
+
+                    for (const auto& sp : g_pendingRestorePaths)
+                    {
+                        if (!g_readOnlyOriginals.count(sp)) continue;
+                        DWORD attrs = ::GetFileAttributesW(sp.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
+                        {
+                            ::SetFileAttributesW(sp.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+                            g_saveClearedPaths.push_back(sp);
+                        }
+                    }
+                    if (roCmd && !g_pendingRestorePaths.empty())
+                    {
+                        g_saveInProgress = true;
+                        ::SendMessage(g_nppData._nppHandle, WM_COMMAND, MAKEWPARAM(roCmd, 0), 0);
+                        g_saveInProgress = false;
+                        log(L"cmdHookProc IDM_FILE_SAVEALL: buffer._isReadOnly toggled off");
+                    }
+                }
+            }
         }
     }
     return ::CallNextHookEx(g_hCmdHook, nCode, wParam, lParam);
@@ -1108,7 +1416,7 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                     allPaths.size(), (int)g_addReadOnly, g_pendingRestorePaths.size());
                 // Fix startup active tab via the proper API.
                 std::wstring activePath = getCurrentFilePath();
-                if (!activePath.empty()) makeBufferEditable(activePath);
+                if (!activePath.empty()) clearSciReadOnly(activePath);
             }
         }
 
@@ -1146,11 +1454,10 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
             }
         }
 
-        // Deferred read-only clear.  Posted by NPPN_READONLYCHANGED because
-        // calling NPPM_SETBUFFERREADONLY from inside the notification is re-entrant:
-        // Notepad++ overrides it when buf->setReadOnly(true) resumes after the
-        // handler returns.  Here we are in the normal message loop, fully unwound.
-        // wParam = buffer ID to clear.
+        // Deferred Scintilla read-only clear.  Posted by NPPN_READONLYCHANGED
+        // because handling it synchronously inside the notification is re-entrant.
+        // Here we are in the normal message loop, fully unwound.
+        // wParam = buffer ID (used for path lookup only).
         if (msg->hwnd == nullptr && msg->message == WM_FL_CLEAR_RO)
         {
             uptr_t roBufferId = static_cast<uptr_t>(msg->wParam);
@@ -1163,18 +1470,42 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 
                 if (!path.empty() && g_pendingRestorePaths.count(path))
                 {
-                    // Belt: NPPM_SETBUFFERREADONLY clears both buffer._isReadOnly
-                    // and pdoc (works here because we are outside any re-entrancy).
-                    LRESULT r1 = ::SendMessage(g_nppData._nppHandle,
-                                               NPPM_SETBUFFERREADONLY,
-                                               static_cast<WPARAM>(roBufferId),
-                                               static_cast<LPARAM>(FALSE));
-                    // Suspenders: SCI_SETREADONLY 0 clears pdoc directly, in case
-                    // the message code for NPPM_SETBUFFERREADONLY is estimated wrong.
                     ::SendMessage(g_nppData._scintillaMainHandle,   SCI_SETREADONLY, 0, 0);
                     ::SendMessage(g_nppData._scintillaSecondHandle, SCI_SETREADONLY, 0, 0);
-                    log(L"WM_FL_CLEAR_RO: bufferId=%llu  NPPM_SETBUFFERREADONLY=%d  SCI_SETREADONLY 0 applied",
-                        static_cast<unsigned long long>(roBufferId), static_cast<int>(r1));
+                    log(L"WM_FL_CLEAR_RO: SCI_SETREADONLY 0 applied for bufferId=%llu",
+                        static_cast<unsigned long long>(roBufferId));
+
+                    // Also clear buffer._isReadOnly in Notepad++'s Buffer cache.
+                    // SCI_SETREADONLY only affects the Scintilla view (pdoc level);
+                    // buffer._isReadOnly is a separate flag that Notepad++ checks
+                    // before allowing a save.  The "Clear Read-Only Flag" menu command
+                    // is one-directional (only clears, never sets) and directly
+                    // targets the active buffer's _isReadOnly.
+                    // We call it here so saves work without the user needing to
+                    // manually invoke it each time.
+                    std::wstring activePath = getCurrentFilePath();
+                    if (activePath == path)  // only act on the active buffer
+                    {
+                        UINT clearCmd = findClearReadOnlyCmdId();
+                        if (clearCmd)
+                        {
+                            LRESULT cr = ::SendMessage(g_nppData._nppHandle,
+                                                       WM_COMMAND,
+                                                       MAKEWPARAM(clearCmd, 0), 0);
+                            log(L"WM_FL_CLEAR_RO: ClearReadOnly cmd=%u result=%d  (buffer._isReadOnly cleared)",
+                                clearCmd, (int)cr);
+                        }
+                        else
+                        {
+                            log(L"WM_FL_CLEAR_RO: ClearReadOnly cmd NOT FOUND — buffer._isReadOnly still true");
+                        }
+                    }
+                    else
+                    {
+                        log(L"WM_FL_CLEAR_RO: bufferId=%llu path='%s' is not active — cannot send ClearReadOnly (active='%s')",
+                            static_cast<unsigned long long>(roBufferId),
+                            path.c_str(), activePath.c_str());
+                    }
                 }
             }
         }
@@ -1182,6 +1513,10 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
         if (msg->message == WM_COMMAND)
         {
             UINT cmdId = LOWORD(msg->wParam);
+
+            // Log every WM_COMMAND ID so the correct delete command can be identified
+            // in the event log when Enable Logging is on.
+            log(L"WM_COMMAND id=%u  locked=%zu", cmdId, g_lockMap.size());
 
             if (cmdId == IDM_FILE_RENAME && !g_lockMap.empty())
             {
@@ -1207,42 +1542,113 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                     if (g_lockMap.count(p)) unlockPath(p);
             }
 
-            // Temporarily clear FILE_ATTRIBUTE_READONLY before Notepad++ writes
-            // to disk so the save succeeds.  r/o is re-applied in NPPN_FILESAVED.
-            if (g_addReadOnly && !g_readOnlyOriginals.empty())
+            if (cmdId == IDM_FILE_DELETE && !g_lockMap.empty())
             {
+                // Release ALL locks so the right-clicked file (which may not be
+                // the active tab) is not blocked by our handle.  unlockPath()
+                // calls restoreReadOnly(), which restores FILE_ATTRIBUTE_READONLY
+                // to its pre-plugin state so the shell sees the file as it was
+                // before we touched it.  The outcome is resolved in WM_SETTEXT
+                // once IDM_FILE_DELETE_EXEC (22007) confirms the operation ran.
+                g_preDeleteLockedPaths.clear();
+                g_deleteOpDispatched = false;
+                for (const auto& kv : g_lockMap)
+                    g_preDeleteLockedPaths.push_back(kv.first);
+                log(L"IDM_FILE_DELETE (41016): releasing %zu lock(s)",
+                    g_preDeleteLockedPaths.size());
+                for (const auto& p : g_preDeleteLockedPaths)
+                    unlockPath(p);
+            }
+
+            // IDM_FILE_DELETE_EXEC (22007) fires after the confirmation dialog
+            // closes, just before SHFileOperationW.  WM_ACTIVATE fires first
+            // (dialog closed, Notepad++ regains focus) — do NOT re-lock there.
+            // Re-release any locks accidentally re-acquired between 41016 and now,
+            // and set the flag so the next WM_SETTEXT resolves cancel vs. success.
+            if (cmdId == IDM_FILE_DELETE_EXEC && !g_preDeleteLockedPaths.empty())
+            {
+                g_deleteOpDispatched = true;
+                for (const auto& p : g_preDeleteLockedPaths)
+                    if (g_lockMap.count(p)) unlockPath(p);
+                log(L"IDM_FILE_DELETE_EXEC (22007): delete operation dispatched");
+            }
+
+            // Menu-initiated saves (IDM_FILE_SAVE via File menu — posted message path).
+            // Ctrl+S is handled by cmdHookProc (WH_CALLWNDPROC, sent messages).
+            // Same strategy: clear FILE_ATTRIBUTE_READONLY, toggle buffer._isReadOnly,
+            // then let the original IDM_FILE_SAVE be dispatched normally.
+            if ((cmdId == IDM_FILE_SAVE || cmdId == IDM_FILE_SAVEALL)
+                && !g_saveInProgress && g_addReadOnly && !g_readOnlyOriginals.empty())
+            {
+                log(L"getMsgHook WM_COMMAND id=%u (posted/menu) originals=%zu pending=%zu",
+                    cmdId, g_readOnlyOriginals.size(), g_pendingRestorePaths.size());
+
                 if (cmdId == IDM_FILE_SAVE)
                 {
                     std::wstring path = getCurrentFilePath();
-                    if (!path.empty() && g_readOnlyOriginals.count(path))
+                    log(L"getMsgHook IDM_FILE_SAVE: path='%s' inOriginals=%d inPending=%d",
+                        path.empty() ? L"(empty)" : path.c_str(),
+                        (int)(path.empty() ? 0 : g_readOnlyOriginals.count(path)),
+                        (int)(path.empty() ? 0 : g_pendingRestorePaths.count(path)));
+
+                    if (!path.empty() && g_readOnlyOriginals.count(path)
+                        && g_pendingRestorePaths.count(path))
                     {
+                        // Step 1: clear FILE_ATTRIBUTE_READONLY from disk.
                         DWORD attrs = ::GetFileAttributesW(path.c_str());
-                        if (attrs != INVALID_FILE_ATTRIBUTES
-                            && (attrs & FILE_ATTRIBUTE_READONLY))
+                        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
                         {
-                            ::SetFileAttributesW(path.c_str(),
-                                attrs & ~FILE_ATTRIBUTE_READONLY);
+                            ::SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
                             g_saveClearedPaths.push_back(path);
+                            log(L"getMsgHook IDM_FILE_SAVE: FILE_ATTRIBUTE_READONLY cleared (attrs was 0x%lX)", attrs);
                         }
+                        else
+                        {
+                            g_saveClearedPaths.push_back(path);
+                            log(L"getMsgHook IDM_FILE_SAVE: attrs=0x%lX  FILE_ATTRIBUTE_READONLY already clear", attrs);
+                        }
+
+                        // Step 2: clear buffer._isReadOnly using "Clear Read-Only Flag".
+                        UINT clearCmd = findClearReadOnlyCmdId();
+                        if (clearCmd)
+                        {
+                            LRESULT cr = ::SendMessage(g_nppData._nppHandle,
+                                                       WM_COMMAND,
+                                                       MAKEWPARAM(clearCmd, 0), 0);
+                            log(L"getMsgHook IDM_FILE_SAVE: ClearReadOnly cmd=%u result=%d  (buffer._isReadOnly cleared)",
+                                clearCmd, (int)cr);
+                        }
+                        else
+                        {
+                            log(L"getMsgHook IDM_FILE_SAVE: ClearReadOnly cmd NOT FOUND — save may fail");
+                        }
+
+                        // Step 3: let DispatchMessage handle the original IDM_FILE_SAVE.
+                        log(L"getMsgHook IDM_FILE_SAVE: both blockers cleared — letting original save proceed");
                     }
                 }
                 else if (cmdId == IDM_FILE_SAVEALL)
                 {
-                    // Save All iterates every modified buffer internally — clear
-                    // r/o for all tracked locked files up front.
-                    for (const auto& kv : g_readOnlyOriginals)
+                    UINT roCmd = findSetReadOnlyCmdId();
+                    log(L"getMsgHook IDM_FILE_SAVEALL: roCmd=%u pending=%zu",
+                        roCmd, g_pendingRestorePaths.size());
+
+                    for (const auto& sp : g_pendingRestorePaths)
                     {
-                        if (g_lockMap.count(kv.first))
+                        if (!g_readOnlyOriginals.count(sp)) continue;
+                        DWORD attrs = ::GetFileAttributesW(sp.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
                         {
-                            DWORD attrs = ::GetFileAttributesW(kv.first.c_str());
-                            if (attrs != INVALID_FILE_ATTRIBUTES
-                                && (attrs & FILE_ATTRIBUTE_READONLY))
-                            {
-                                ::SetFileAttributesW(kv.first.c_str(),
-                                    attrs & ~FILE_ATTRIBUTE_READONLY);
-                                g_saveClearedPaths.push_back(kv.first);
-                            }
+                            ::SetFileAttributesW(sp.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+                            g_saveClearedPaths.push_back(sp);
                         }
+                    }
+                    if (roCmd && !g_pendingRestorePaths.empty())
+                    {
+                        g_saveInProgress = true;
+                        ::SendMessage(g_nppData._nppHandle, WM_COMMAND, MAKEWPARAM(roCmd, 0), 0);
+                        g_saveInProgress = false;
+                        log(L"getMsgHook IDM_FILE_SAVEALL: buffer._isReadOnly toggled off");
                     }
                 }
             }
@@ -1340,7 +1746,48 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
             // Determine the path now shown in the (just-updated) title bar.
             std::wstring currentPath = getCurrentFilePath();
 
-            if (!g_preRenameLockedPaths.empty())
+            if (!g_preDeleteLockedPaths.empty())
+            {
+                // Check whether any of the previously-locked files is now gone.
+                std::wstring deletedPath;
+                for (const auto& p : g_preDeleteLockedPaths)
+                {
+                    if (::GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    {
+                        deletedPath = p;
+                        break;
+                    }
+                }
+
+                if (!deletedPath.empty())
+                {
+                    // Delete succeeded — re-lock all other files.
+                    log(L"Delete confirmed: '%s' moved to recycle bin",
+                        deletedPath.c_str());
+                    for (const auto& p : g_preDeleteLockedPaths)
+                        if (p != deletedPath) lockPath(p);
+                    g_preDeleteLockedPaths.clear();
+                    g_deleteOpDispatched = false;
+                    // Auto-lock the newly active file.
+                    if (g_lockingEnabled && !currentPath.empty()
+                        && !g_lockMap.count(currentPath))
+                        lockPath(currentPath);
+                }
+                else if (g_deleteOpDispatched)
+                {
+                    // IDM_FILE_DELETE_EXEC fired but no file disappeared →
+                    // delete was cancelled or failed.  Restore all locks.
+                    log(L"Delete cancelled: re-locking %zu file(s)",
+                        g_preDeleteLockedPaths.size());
+                    for (const auto& p : g_preDeleteLockedPaths)
+                        lockPath(p);
+                    g_preDeleteLockedPaths.clear();
+                    g_deleteOpDispatched = false;
+                }
+                // else: IDM_FILE_DELETE_EXEC hasn't fired yet (dialog still open
+                // or WM_SETTEXT is a title refresh mid-dialog).  Wait.
+            }
+            else if (!g_preRenameLockedPaths.empty())
             {
                 // Check whether any of the previously-locked files is now gone.
                 std::wstring renamedFrom;
@@ -1398,10 +1845,10 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
             // processes the call, it re-reads disk and resets buffer._isReadOnly=true.
             // FILE_ATTRIBUTE_READONLY was cleared in TCN_SELCHANGE, so we are still
             // in the clear window — call the API now while the disk shows writable.
-            // (makeBufferEditable also skips originally-read-only files via the
+            // (clearSciReadOnly also skips originally-read-only files via the
             //  g_pendingRestorePaths check, keeping those correctly non-editable.)
             if (g_addReadOnly && !currentPath.empty())
-                makeBufferEditable(currentPath);
+                clearSciReadOnly(currentPath);
 
             // Diagnostic: log the complete state after tab switch
             {
@@ -1414,7 +1861,7 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                     (unsigned long long)bid);
             }
 
-            // makeBufferEditable called above (before restore).
+            // clearSciReadOnly called above (before restore).
             // Now restore FILE_ATTRIBUTE_READONLY for external protection.
             if (g_addReadOnly && !g_pendingRestorePaths.empty())
             {
@@ -1460,14 +1907,14 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
             && g_preRenameLockedPaths.empty())
         {
             std::wstring activePath = getCurrentFilePath();
-            if (!activePath.empty()) makeBufferEditable(activePath);  // before restore!
+            if (!activePath.empty()) clearSciReadOnly(activePath);  // before restore!
             for (const auto& path : g_pendingRestorePaths)
             {
                 DWORD attrs = ::GetFileAttributesW(path.c_str());
                 if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_READONLY))
                     ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
             }
-            log(L"WH_CALLWNDPROCRET WA_ACTIVE: makeBufferEditable + restored attrs");
+            log(L"WH_CALLWNDPROCRET WA_ACTIVE: clearSciReadOnly + restored attrs");
         }
     }
     return ::CallNextHookEx(g_hTitleHook, nCode, wParam, lParam);
@@ -1853,6 +2300,7 @@ void showLockStatus()
 // ─────────────────────────────────────────────────────────────────────────────
 static const int IDC_LOG_EDIT = 101;
 static const int IDC_LOG_OK   = 102;
+static const int IDC_LOG_COPY = 103;
 
 static const wchar_t* g_logWndText   = nullptr; // set before CreateWindowEx
 static bool           g_logWndClosed = false;
@@ -1893,10 +2341,22 @@ static LRESULT CALLBACK logWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         if (g_logWndText)
             ::SetWindowTextW(hEdit, g_logWndText);
 
+        // Two buttons centred as a group: [Copy Log] [OK]
+        static const int BTN_W_COPY = 90, BTN_GAP = 8;
+        int groupW = BTN_W_COPY + BTN_GAP + BTN_W;
+        int bx = (rc.right - groupW) / 2;
+        int by = rc.bottom - BTN_H - MARGIN;
+
+        ::CreateWindowExW(
+            0, L"BUTTON", L"Copy Log",
+            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+            bx, by, BTN_W_COPY, BTN_H,
+            hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_LOG_COPY)), hi, nullptr);
+
         ::CreateWindowExW(
             0, L"BUTTON", L"OK",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            (rc.right - BTN_W) / 2, rc.bottom - BTN_H - MARGIN, BTN_W, BTN_H,
+            bx + BTN_W_COPY + BTN_GAP, by, BTN_W, BTN_H,
             hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_LOG_OK)), hi, nullptr);
 
         return 0;
@@ -1907,23 +2367,64 @@ static LRESULT CALLBACK logWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         RECT rc;
         ::GetClientRect(hwnd, &rc);
         HWND hEdit = ::GetDlgItem(hwnd, IDC_LOG_EDIT);
-        HWND hBtn  = ::GetDlgItem(hwnd, IDC_LOG_OK);
+        HWND hCopy = ::GetDlgItem(hwnd, IDC_LOG_COPY);
+        HWND hOk   = ::GetDlgItem(hwnd, IDC_LOG_OK);
         if (hEdit)
             ::SetWindowPos(hEdit, nullptr,
                 MARGIN, MARGIN,
                 rc.right  - 2 * MARGIN,
                 rc.bottom - BTN_H - 3 * MARGIN,
                 SWP_NOZORDER);
-        if (hBtn)
-            ::SetWindowPos(hBtn, nullptr,
-                (rc.right - BTN_W) / 2, rc.bottom - BTN_H - MARGIN,
+        static const int BTN_W_COPY = 90, BTN_GAP = 8;
+        int groupW = BTN_W_COPY + BTN_GAP + BTN_W;
+        int bx = (rc.right - groupW) / 2;
+        int by = rc.bottom - BTN_H - MARGIN;
+        if (hCopy)
+            ::SetWindowPos(hCopy, nullptr, bx, by, BTN_W_COPY, BTN_H, SWP_NOZORDER);
+        if (hOk)
+            ::SetWindowPos(hOk, nullptr, bx + BTN_W_COPY + BTN_GAP, by,
                 BTN_W, BTN_H, SWP_NOZORDER);
         return 0;
     }
 
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_LOG_OK || LOWORD(wParam) == IDCANCEL)
+        {
             ::DestroyWindow(hwnd);
+        }
+        else if (LOWORD(wParam) == IDC_LOG_COPY)
+        {
+            HWND hEdit = ::GetDlgItem(hwnd, IDC_LOG_EDIT);
+            if (hEdit)
+            {
+                int len = ::GetWindowTextLengthW(hEdit);
+                if (len > 0)
+                {
+                    HGLOBAL hMem = ::GlobalAlloc(GMEM_MOVEABLE,
+                        static_cast<SIZE_T>(len + 1) * sizeof(wchar_t));
+                    if (hMem)
+                    {
+                        wchar_t* ptr = static_cast<wchar_t*>(::GlobalLock(hMem));
+                        if (ptr)
+                        {
+                            ::GetWindowTextW(hEdit, ptr, len + 1);
+                            ::GlobalUnlock(hMem);
+                            if (::OpenClipboard(hwnd))
+                            {
+                                ::EmptyClipboard();
+                                ::SetClipboardData(CF_UNICODETEXT, hMem);
+                                ::CloseClipboard();
+                                // hMem is now owned by the clipboard — do not free
+                            }
+                            else
+                                ::GlobalFree(hMem);
+                        }
+                        else
+                            ::GlobalFree(hMem);
+                    }
+                }
+            }
+        }
         return 0;
 
     case WM_CLOSE:
@@ -2065,6 +2566,16 @@ void showLog()
         BOOL bRet = ::GetMessageW(&msg, nullptr, 0, 0);
         if (bRet == 0) { ::PostQuitMessage(static_cast<int>(msg.wParam)); break; }
         if (bRet < 0)  break;
+        // Ctrl+A: select all in the EDIT control.
+        // Handled here rather than relying on IsDialogMessageW, which does not
+        // forward Ctrl+A to multiline EDIT controls on all Windows versions.
+        if (msg.message == WM_KEYDOWN && msg.wParam == 'A'
+            && (::GetKeyState(VK_CONTROL) & 0x8000))
+        {
+            HWND hEdit = ::GetDlgItem(hDlg, IDC_LOG_EDIT);
+            if (hEdit) ::SendMessageW(hEdit, EM_SETSEL, 0, -1);
+            continue;
+        }
         if (!::IsDialogMessageW(hDlg, &msg))
         {
             ::TranslateMessage(&msg);
@@ -2357,6 +2868,18 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
             break;
         }
 
+        case NPPN_FILEBEFORESAVE:
+        {
+            // Fires just before Notepad++ writes the file to disk.
+            // If this appears in the log after IDM_FILE_SAVE, the save is proceeding.
+            // If this is absent, buffer._isReadOnly=true still blocked the write.
+            std::wstring path = getCurrentFilePath();
+            log(L"NPPN_FILEBEFORESAVE: bufferId=%llu  path='%s'",
+                (unsigned long long)bufferId,
+                path.empty() ? L"(empty)" : path.c_str());
+            break;
+        }
+
         case NPPN_FILESAVED:
         {
             // Handles Save-As path changes and first-save of an unsaved tab.
@@ -2381,22 +2904,17 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
                 // Normal save: path unchanged, existing handle remains valid.
             }
 
-            // Re-apply FILE_ATTRIBUTE_READONLY after the write (was temporarily
-            // cleared by getMsgHookProc so Notepad++ could open the file for
-            // writing).  lockPath() already set it for Save-As / first-save
-            // scenarios, so this is a no-op in those cases.
-            if (g_addReadOnly && !newPath.empty()
-                && g_lockMap.count(newPath) && g_readOnlyOriginals.count(newPath))
-            {
-                // Remove the path from the pending-restore list.
-                for (auto sc = g_saveClearedPaths.begin();
-                     sc != g_saveClearedPaths.end(); ++sc)
-                {
-                    if (*sc == newPath) { g_saveClearedPaths.erase(sc); break; }
-                }
-                ::SetFileAttributesW(newPath.c_str(),
-                    g_readOnlyOriginals[newPath] | FILE_ATTRIBUTE_READONLY);
-            }
+            // Do NOT restore FILE_ATTRIBUTE_READONLY here.  Notepad++ runs a
+            // post-save check after NPPN_FILESAVED returns: if it finds
+            // FILE_ATTRIBUTE_READONLY set it reports "Save failed" even though
+            // the write succeeded.  The existing WM_SETTEXT handler restores
+            // the attribute naturally when Notepad++ updates the title bar
+            // (removes the "*") after the post-save checks complete.
+            for (auto sc = g_saveClearedPaths.begin();
+                 sc != g_saveClearedPaths.end(); ++sc)
+                if (*sc == newPath) { g_saveClearedPaths.erase(sc); break; }
+            log(L"NPPN_FILESAVED: save complete for '%s' — RO restore deferred to WM_SETTEXT",
+                newPath.c_str());
             break;
         }
 
@@ -2475,6 +2993,16 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
             log(L"NPPN_READONLYCHANGED fired: realBufferId=%llu  docStatus=%u",
                 static_cast<unsigned long long>(roBufferId), docStatus);
 
+            // During our controlled toggle (save handler), capture the result and
+            // do nothing else.  The save handler checks g_lastToggleDocStatus to
+            // detect a wrong-direction toggle and correct it before the save runs.
+            if (g_toggleInProgress)
+            {
+                g_lastToggleDocStatus = docStatus;
+                log(L"NPPN_READONLYCHANGED: captured toggle result docStatus=%u", docStatus);
+                break;
+            }
+
             // Only act when the buffer just became read-only (DOCSTATUS_READONLY=1).
             // When it became writable we don't need to do anything.
             if (!(docStatus & DOCSTATUS_READONLY)) break;
@@ -2520,6 +3048,8 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
             g_renamePendingLocks.clear();
             g_preRenameLockedPaths.clear();
             g_renameOpDispatched = false;
+            g_preDeleteLockedPaths.clear();
+            g_deleteOpDispatched = false;
             g_saveClearedPaths.clear();
             g_foreignOpenPaths.clear();
             g_pendingInitialLock = false;

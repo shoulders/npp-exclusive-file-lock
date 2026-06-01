@@ -1,7 +1,4 @@
 {
-  "env": {
-    "MAX_THINKING_TOKENS": "10000"
-  },
   "permissions": {
     "allow": [
       "Bash(Get-ChildItem -Path \"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\" -Recurse -Force)",
@@ -30,7 +27,8 @@
       "Bash(cmd /c \"\\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" && msbuild \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\vs.proj\\\\FileLockPlugin.vcxproj\\\\\" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal\")",
       "Bash(cmd /c \"cd /d \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\\" && \\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" && msbuild vs.proj\\\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal 2>&1\")",
       "Bash(cmd /c \"\\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" 2>nul && msbuild \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\vs.proj\\\\FileLockPlugin.vcxproj\\\\\" /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal 2>&1\")",
-      "Bash(cmd /c \"cd /d \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\\" && \\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" > nul 2>&1 && msbuild vs.proj\\\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal 2>&1 || echo BUILD_FAILED\")"
+      "Bash(cmd /c \"cd /d \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\\" && \\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" > nul 2>&1 && msbuild vs.proj\\\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal 2>&1 || echo BUILD_FAILED\")",
+      "Bash(cmd /c \"cd /d \\\\\"d:\\\\websites\\\\htdocs\\\\projects\\\\standalone\\\\FileLockPlugin \\(Notepad++\\)\\\\\" && \\\\\"C:\\\\Program Files \\(x86\\)\\\\Microsoft Visual Studio\\\\18\\\\BuildTools\\\\VC\\\\Auxiliary\\\\Build\\\\vcvars64.bat\\\\\" && msbuild vs.proj\\\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo /v:minimal\")"
     ]
   },
   "contextCompactionThreshold": 80,

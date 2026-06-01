@@ -156,6 +156,16 @@ Open **Plugins > ExclusiveFileLock > Show Log** at any time.  The dialog shows:
 | **Attribute tracking tables** | Contents of `g_readOnlyOriginals` (original attributes before the plugin touched them) and `g_pendingRestorePaths` (files whose `FILE_ATTRIBUTE_READONLY` we set and must restore on unlock or crash recovery). |
 | **Scintilla writability test** | Forces `SCI_SETREADONLY 0` then attempts a programmatic `SCI_ADDTEXT` insertion to confirm the document is genuinely editable at the `pdoc` level, not just at the view flag level. |
 
+### Log lifetime and scope
+
+| Property | Detail |
+| --- | --- |
+| **Per session** | The log lives in memory inside the plugin DLL. It accumulates from the moment logging was last enabled, up to the 200-entry cap. It is **not** written to disk. |
+| **Cleared on restart** | Restarting Notepad++ unloads and reloads the DLL, so the log starts completely empty after every restart — even if **Enable Logging** was on when Notepad++ closed. |
+| **Cleared on toggle** | Every time **Enable Logging** is turned on, the existing log is discarded and the timestamp counter resets, so the new session always starts from a clean slate. |
+| **Per Notepad++ instance** | Each Notepad++ window is a separate Windows process with its own copy of the plugin DLL and its own in-memory log. If you have multiple Notepad++ windows open simultaneously, each has an independent log — opening **Show Log** in one window shows only the events from that window. |
+| **Entry cap** | Up to 200 timestamped entries are kept. Once the cap is reached, new events are silently dropped until logging is toggled off and on again to clear the log. |
+
 ### When to use logging
 
 - Turn logging on before reproducing a problem (spurious unlocks, file
