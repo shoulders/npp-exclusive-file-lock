@@ -99,13 +99,46 @@ overwriting a read-only file.
 
 | Event | Behaviour |
 | --- | --- |
-| File locked (auto or manual) | `FILE_ATTRIBUTE_READONLY` is set.  The original attribute value is saved internally. |
-| File saved from Notepad++ | The flag is **temporarily cleared** just before Notepad++ writes, then **restored immediately** after the save completes — so saving works normally from Notepad++ while the file remains read-only to everything else. |
+| File locked (auto or manual) | Original attribute saved internally.  `FILE_ATTRIBUTE_READONLY` is applied to disk the next time Notepad++ loses focus (see *When the attribute is applied* below). |
+| File saved from Notepad++ | `FILE_ATTRIBUTE_READONLY` is **temporarily cleared** before Notepad++ writes, allowing the save to succeed.  The flag is **not** immediately re-applied after the save — it remains clear until Notepad++ next loses focus. |
 | File unlocked (any reason) | The original attribute value is restored exactly as it was before the plugin touched it. |
 | Tab closed | Original attributes restored and lock released. |
 | **Toggle File Locking** turned OFF | All locks released; all attributes restored. |
 | **Add Read-only** turned OFF | All attributes restored; locks remain held. |
 | Notepad++ shutdown | All locks released; all attributes restored. |
+
+### When the attribute is applied — and the brief unprotected window
+
+`FILE_ATTRIBUTE_READONLY` is **not** set while Notepad++ has focus.  It is applied
+only when Notepad++ loses focus, and cleared again as soon as Notepad++ regains
+focus.  This is deliberate: setting the attribute while Notepad++ is focused
+triggers its internal file monitor, which marks the buffer as read-only and causes
+grey icons, blocked saves, and edit failures (see *How Notepad++ read-only state
+works internally* below for the full chain).  Deferring the attribute to focus loss
+entirely avoids that cycle.
+
+**What this means in practice:**
+
+- While you are actively working in Notepad++ (including immediately after a save
+  and while you continue typing), `FILE_ATTRIBUTE_READONLY` is **not** set on disk.
+- The attribute is re-applied automatically the next time you move focus away from
+  Notepad++ — for example, by switching to another application window, opening the
+  Start menu, or clicking on the desktop.
+- From observation, actions that typically precede or coincide with a focus change
+  — switching tabs and then switching away, triggering certain menu dialogs, or
+  saving and then moving to another application — all result in the flag being
+  present when an external tool next reads the file attributes.
+
+**Security note:** During the focused window, `FILE_ATTRIBUTE_READONLY` is not
+present on disk, so a background process could theoretically write to the file
+without the flag stopping it.  However, the exclusive Win32 lock (`CreateFile`
+with no `FILE_SHARE_DELETE`) remains active at all times regardless of the
+attribute state.  That lock is the **primary protection** this plugin provides: it
+blocks any process that requests write access through the standard Windows API.
+The `FILE_ATTRIBUTE_READONLY` flag is a **secondary, advisory layer** aimed at
+applications that bypass share-mode locking (see *Add Read-only option* above) —
+it is not a security boundary and is not intended to protect against system-level
+or privileged access.
 
 ### Limitations
 
