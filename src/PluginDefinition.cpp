@@ -374,6 +374,13 @@ static bool g_rememberOptions = false;
 //   restored g_lockingEnabled value).
 static bool g_pendingInitialLock = false;
 
+// g_nppActive
+//   Tracks whether Notepad++ currently has the foreground focus.
+//   FILE_ATTRIBUTE_READONLY is only applied to locked files while g_nppActive is FALSE.
+//   While Notepad++ is focused, the attribute stays clear so saves and tab switches
+//   never trigger the file-monitor cycle that causes grey icons and save failures.
+//   Initialized to true: Notepad++ is assumed focused at startup.
+static bool g_nppActive = true;
 
 // g_pendingBufferId — buffer ID saved from NPPN_BUFFERACTIVATED before the
 // title bar updates.  Correlated with the path in the next WM_SETTEXT so
@@ -674,9 +681,15 @@ static void applyReadOnly(const std::wstring& path)
     g_readOnlyOriginals[path] = attrs;
     if (!(attrs & FILE_ATTRIBUTE_READONLY))
     {
-        ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
         g_pendingRestorePaths.insert(path);
         savePendingRestoreRegistry();
+        // Only set FILE_ATTRIBUTE_READONLY on disk when Notepad++ does not have focus.
+        // While Notepad++ is focused, leaving the attribute clear prevents the
+        // file-monitor cycle (attr set → monitor fires → buffer._isReadOnly=true →
+        // grey icon + save failures).  The attribute is applied when Notepad++
+        // loses focus (WA_INACTIVE handler) and cleared when it regains focus.
+        if (!g_nppActive)
+            ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
     }
 }
 
@@ -1164,33 +1177,40 @@ static LRESULT CALLBACK cmdHookProc(int nCode, WPARAM wParam, LPARAM lParam)
     {
         const CWPSTRUCT* p = reinterpret_cast<const CWPSTRUCT*>(lParam);
 
-        // Log Notepad++ focus gain and loss for diagnostics.
-        if (p->hwnd == g_nppData._nppHandle && p->message == WM_ACTIVATE)
+        // Track Notepad++ focus and manage FILE_ATTRIBUTE_READONLY.
+        //
+        // Strategy: FILE_ATTRIBUTE_READONLY is ONLY on disk while Notepad++ does NOT
+        // have focus.  While focused, the attribute is always clear so tab switches,
+        // saves, and file-monitor callbacks never trigger the grey-icon cycle.
+        //
+        // WA_INACTIVE → Notepad++ losing focus: set FILE_ATTRIBUTE_READONLY on all
+        //               files we manage (external protection while user is elsewhere).
+        // WA_ACTIVE   → Notepad++ gaining focus: clear FILE_ATTRIBUTE_READONLY on all
+        //               files so Notepad++ sees them as writable during activation.
+        if (p->hwnd == g_nppData._nppHandle && p->message == WM_ACTIVATE
+            && g_preRenameLockedPaths.empty())
         {
             UINT activationState = LOWORD(p->wParam);
             if (activationState == WA_INACTIVE)
-                log(L"FOCUS LOST: Notepad++ losing focus");
-            else
-                log(L"FOCUS GAINED: Notepad++ gaining focus (WA=%u)", activationState);
-        }
-
-        // WM_ACTIVATE (WA_ACTIVE / WA_CLICKACTIVE) on the Notepad++ main window:
-        // Notepad++ is about to gain focus.  Clear FILE_ATTRIBUTE_READONLY on all
-        // files we manage BEFORE WM_ACTIVATE is processed, so Notepad++ reads the
-        // files as writable during its activation check and never sets
-        // pdoc->readonly=true.  Skip during rename operations.
-        // WM_NOTIFY (TCN_SELCHANGE) — user is switching tabs.
-        // Log the event for diagnostics and clear FILE_ATTRIBUTE_READONLY so
-        // Notepad++ reads the file as writable during buffer activation.
-        if (p->hwnd    == g_nppData._nppHandle
-            && p->message == WM_NOTIFY
-            && !g_enumerating
-            && g_preRenameLockedPaths.empty())
-        {
-            const NMHDR* nm = reinterpret_cast<const NMHDR*>(p->lParam);
-            if (nm && nm->code == TCN_SELCHANGE)
             {
-                log(L"TAB SWITCH: TCN_SELCHANGE fired (before Notepad++ activates buffer)");
+                g_nppActive = false;
+                log(L"FOCUS LOST: Notepad++ losing focus — applying FILE_ATTRIBUTE_READONLY");
+                if (g_addReadOnly && !g_pendingRestorePaths.empty())
+                {
+                    for (const auto& path : g_pendingRestorePaths)
+                    {
+                        DWORD attrs = ::GetFileAttributesW(path.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_READONLY))
+                            ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
+                    }
+                    log(L"WH_CALLWNDPROC WA_INACTIVE: FILE_ATTRIBUTE_READONLY set on %zu file(s)",
+                        g_pendingRestorePaths.size());
+                }
+            }
+            else
+            {
+                g_nppActive = true;
+                log(L"FOCUS GAINED: Notepad++ gaining focus (WA=%u) — clearing FILE_ATTRIBUTE_READONLY", activationState);
                 if (g_addReadOnly && !g_pendingRestorePaths.empty())
                 {
                     for (const auto& path : g_pendingRestorePaths)
@@ -1199,29 +1219,24 @@ static LRESULT CALLBACK cmdHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                         if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
                             ::SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
                     }
-                    log(L"TAB SWITCH: cleared FILE_ATTRIBUTE_READONLY before buffer activation");
+                    log(L"WH_CALLWNDPROC WA_ACTIVE: FILE_ATTRIBUTE_READONLY cleared on %zu file(s)",
+                        g_pendingRestorePaths.size());
                 }
             }
         }
 
-        // WM_ACTIVATE (WA_ACTIVE) — Notepad++ gaining focus.
-        // Clear FILE_ATTRIBUTE_READONLY before Notepad++ processes WM_ACTIVATE so
-        // the active buffer is activated with the disk showing "writable".
-        // NPPM_SETBUFFERREADONLY is called after (in WH_CALLWNDPROCRET) to handle
-        // the cache case.
-        if (g_addReadOnly
-            && p->hwnd    == g_nppData._nppHandle
-            && p->message == WM_ACTIVATE
-            && LOWORD(p->wParam) != WA_INACTIVE
+        // WM_NOTIFY (TCN_SELCHANGE) — user is switching tabs.
+        // No longer touches FILE_ATTRIBUTE_READONLY here: the attribute is managed
+        // purely by focus changes (WA_INACTIVE/WA_ACTIVE).  Tab switches happen
+        // only while Notepad++ is focused, so the attribute is already clear.
+        if (p->hwnd    == g_nppData._nppHandle
+            && p->message == WM_NOTIFY
+            && !g_enumerating
             && g_preRenameLockedPaths.empty())
         {
-            for (const auto& path : g_pendingRestorePaths)
-            {
-                DWORD attrs = ::GetFileAttributesW(path.c_str());
-                if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
-                    ::SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
-            }
-            log(L"WH_CALLWNDPROC WA_ACTIVE: cleared FILE_ATTRIBUTE_READONLY");
+            const NMHDR* nm = reinterpret_cast<const NMHDR*>(p->lParam);
+            if (nm && nm->code == TCN_SELCHANGE)
+                log(L"TAB SWITCH: TCN_SELCHANGE fired");
         }
 
         // WM_COMMAND IDM_FILE_SAVE / IDM_FILE_SAVEALL (Ctrl+S — sent message path).
@@ -1470,42 +1485,13 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 
                 if (!path.empty() && g_pendingRestorePaths.count(path))
                 {
+                    // Clear Scintilla's pdoc->readonly so the editor remains editable.
+                    // buffer._isReadOnly is handled by NPPN_BUFFERACTIVATED (active buf)
+                    // and WA_ACTIVE handler (on focus regain) using ClearReadOnly command.
                     ::SendMessage(g_nppData._scintillaMainHandle,   SCI_SETREADONLY, 0, 0);
                     ::SendMessage(g_nppData._scintillaSecondHandle, SCI_SETREADONLY, 0, 0);
-                    log(L"WM_FL_CLEAR_RO: SCI_SETREADONLY 0 applied for bufferId=%llu",
-                        static_cast<unsigned long long>(roBufferId));
-
-                    // Also clear buffer._isReadOnly in Notepad++'s Buffer cache.
-                    // SCI_SETREADONLY only affects the Scintilla view (pdoc level);
-                    // buffer._isReadOnly is a separate flag that Notepad++ checks
-                    // before allowing a save.  The "Clear Read-Only Flag" menu command
-                    // is one-directional (only clears, never sets) and directly
-                    // targets the active buffer's _isReadOnly.
-                    // We call it here so saves work without the user needing to
-                    // manually invoke it each time.
-                    std::wstring activePath = getCurrentFilePath();
-                    if (activePath == path)  // only act on the active buffer
-                    {
-                        UINT clearCmd = findClearReadOnlyCmdId();
-                        if (clearCmd)
-                        {
-                            LRESULT cr = ::SendMessage(g_nppData._nppHandle,
-                                                       WM_COMMAND,
-                                                       MAKEWPARAM(clearCmd, 0), 0);
-                            log(L"WM_FL_CLEAR_RO: ClearReadOnly cmd=%u result=%d  (buffer._isReadOnly cleared)",
-                                clearCmd, (int)cr);
-                        }
-                        else
-                        {
-                            log(L"WM_FL_CLEAR_RO: ClearReadOnly cmd NOT FOUND — buffer._isReadOnly still true");
-                        }
-                    }
-                    else
-                    {
-                        log(L"WM_FL_CLEAR_RO: bufferId=%llu path='%s' is not active — cannot send ClearReadOnly (active='%s')",
-                            static_cast<unsigned long long>(roBufferId),
-                            path.c_str(), activePath.c_str());
-                    }
+                    log(L"WM_FL_CLEAR_RO: SCI_SETREADONLY 0 applied for bufferId=%llu path='%s'",
+                        static_cast<unsigned long long>(roBufferId), path.c_str());
                 }
             }
         }
@@ -1840,17 +1826,10 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                 lockPath(currentPath);
             }
 
-            // NPPM_SETBUFFERREADONLY must be called BEFORE restoring
-            // FILE_ATTRIBUTE_READONLY.  If the flag is on disk when Notepad++
-            // processes the call, it re-reads disk and resets buffer._isReadOnly=true.
-            // FILE_ATTRIBUTE_READONLY was cleared in TCN_SELCHANGE, so we are still
-            // in the clear window — call the API now while the disk shows writable.
-            // (clearSciReadOnly also skips originally-read-only files via the
-            //  g_pendingRestorePaths check, keeping those correctly non-editable.)
             if (g_addReadOnly && !currentPath.empty())
                 clearSciReadOnly(currentPath);
 
-            // Diagnostic: log the complete state after tab switch
+            // Diagnostic: log the complete state after tab switch / title update
             {
                 uptr_t bid = 0;
                 for (const auto& kv : g_idToPath)
@@ -1861,35 +1840,12 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                     (unsigned long long)bid);
             }
 
-            // clearSciReadOnly called above (before restore).
-            // Now restore FILE_ATTRIBUTE_READONLY for external protection.
-            if (g_addReadOnly && !g_pendingRestorePaths.empty())
-            {
-                for (const auto& path : g_pendingRestorePaths)
-                {
-                    DWORD attrs = ::GetFileAttributesW(path.c_str());
-                    if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_READONLY))
-                        ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
-                }
-                log(L"WM_SETTEXT: restored FILE_ATTRIBUTE_READONLY after tab switch");
-            }
-
-            // Safety net: if a save failed (NPPN_FILESAVED never fired),
-            // re-apply FILE_ATTRIBUTE_READONLY on the next title-bar update.
-            if (!g_saveClearedPaths.empty())
-            {
-                for (const auto& sp : g_saveClearedPaths)
-                {
-                    if (g_readOnlyOriginals.count(sp) && g_lockMap.count(sp))
-                    {
-                        DWORD cur = ::GetFileAttributesW(sp.c_str());
-                        if (cur != INVALID_FILE_ATTRIBUTES
-                            && !(cur & FILE_ATTRIBUTE_READONLY))
-                            ::SetFileAttributesW(sp.c_str(), cur | FILE_ATTRIBUTE_READONLY);
-                    }
-                }
-                g_saveClearedPaths.clear();
-            }
+            // FILE_ATTRIBUTE_READONLY is managed exclusively by focus events (WA_INACTIVE /
+            // WA_ACTIVE).  Do NOT restore it here: restoring after every WM_SETTEXT (tab
+            // switch, save) triggers the file-monitor cycle which causes grey icons and
+            // save failures for non-active buffers.  The attribute is already clear while
+            // Notepad++ is focused, which is the only time WM_SETTEXT fires.
+            g_saveClearedPaths.clear();  // no longer needed — no WM_SETTEXT restore
         }
 
         // NOTE: WM_ACTIVATE fires when the rename dialog closes, BEFORE
@@ -1898,8 +1854,11 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
         // WM_SETTEXT block above once g_renameOpDispatched is set.
 
         // WM_ACTIVATE (WA_ACTIVE) — Notepad++ has processed the activation.
-        // Call NPPM_SETBUFFERREADONLY FIRST (while FILE_ATTRIBUTE_READONLY is still
-        // cleared from WH_CALLWNDPROC), then restore the flag.
+        // FILE_ATTRIBUTE_READONLY was already cleared in WH_CALLWNDPROC (before
+        // WM_ACTIVATE ran).  Now call "Clear Read-Only Flag" to clear buffer._isReadOnly
+        // which the file monitor set during our inactive period.
+        // Do NOT restore FILE_ATTRIBUTE_READONLY here — it stays clear while Notepad++
+        // is focused (managed by WA_INACTIVE only).
         if (g_addReadOnly
             && p->hwnd    == g_nppData._nppHandle
             && p->message == WM_ACTIVATE
@@ -1907,14 +1866,22 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
             && g_preRenameLockedPaths.empty())
         {
             std::wstring activePath = getCurrentFilePath();
-            if (!activePath.empty()) clearSciReadOnly(activePath);  // before restore!
-            for (const auto& path : g_pendingRestorePaths)
+            if (!activePath.empty()) clearSciReadOnly(activePath);
+
+            // Clear buffer._isReadOnly for the newly active buffer.
+            UINT clearCmd = findClearReadOnlyCmdId();
+            if (clearCmd && !activePath.empty()
+                && g_pendingRestorePaths.count(activePath))
             {
-                DWORD attrs = ::GetFileAttributesW(path.c_str());
-                if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_READONLY))
-                    ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
+                LRESULT cr = ::SendMessage(g_nppData._nppHandle,
+                                           WM_COMMAND, MAKEWPARAM(clearCmd, 0), 0);
+                log(L"WH_CALLWNDPROCRET WA_ACTIVE: ClearReadOnly cmd=%u result=%d for '%s'",
+                    clearCmd, (int)cr, activePath.c_str());
             }
-            log(L"WH_CALLWNDPROCRET WA_ACTIVE: clearSciReadOnly + restored attrs");
+            else
+            {
+                log(L"WH_CALLWNDPROCRET WA_ACTIVE: clearSciReadOnly done (no ClearReadOnly needed or cmd not found)");
+            }
         }
     }
     return ::CallNextHookEx(g_hTitleHook, nCode, wParam, lParam);
@@ -2850,10 +2817,11 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
             }
             // else: known buffer re-activated (tab switch) — no action needed.
 
-            // If Add Read-only is on and this file is managed by us, clear
-            // Scintilla's read-only state.  Notepad++ calls pdoc->SetReadOnly(true)
-            // via direct C++ during buffer activation (before WM_SETTEXT fires),
-            // so this is the earliest point we can counter it.
+            // If Add Read-only is on and this file is managed by us, clear both
+            // Scintilla's pdoc->readonly AND Notepad++'s buffer._isReadOnly.
+            // This fixes the non-active-buffer problem: a buffer that was set
+            // buffer._isReadOnly=true while not active (by the file monitor during
+            // our inactive period) gets correctly cleared when the user switches to it.
             if (g_addReadOnly && !path.empty() && g_pendingRestorePaths.count(path))
             {
                 LRESULT roBefore = ::SendMessage(g_nppData._scintillaMainHandle,
@@ -2862,8 +2830,16 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification* notifyCode)
                 ::SendMessage(g_nppData._scintillaSecondHandle, SCI_SETREADONLY, 0, 0);
                 LRESULT roAfter = ::SendMessage(g_nppData._scintillaMainHandle,
                                                 SCI_GETREADONLY, 0, 0);
-                log(L"BUFFERACTIVATED: RO_before=%d  RO_after=%d",
-                    (int)roBefore, (int)roAfter);
+                log(L"BUFFERACTIVATED: RO_before=%d  RO_after=%d", (int)roBefore, (int)roAfter);
+
+                // Clear buffer._isReadOnly so the tab icon is not grey and saves work.
+                UINT clearCmd = findClearReadOnlyCmdId();
+                if (clearCmd)
+                {
+                    LRESULT cr = ::SendMessage(g_nppData._nppHandle,
+                                               WM_COMMAND, MAKEWPARAM(clearCmd, 0), 0);
+                    log(L"BUFFERACTIVATED: ClearReadOnly cmd=%u result=%d", clearCmd, (int)cr);
+                }
             }
             break;
         }
