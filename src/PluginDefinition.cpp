@@ -57,19 +57,17 @@
 // MENU STRUCTURE
 // ──────────────
 // Index  Label                       Behaviour
-//  [0]   Toggle File Locking (On/Off) Flips g_lockingEnabled; updates check-mark
+//  [0]   Enable File Locking          Flips g_lockingEnabled; updates check-mark; persisted to registry
 //  [1]   (separator)                  Empty name → Notepad++ renders a line
 //  [2]   Lock Current File            Manually locks the active tab
 //  [3]   Unlock Current File          Manually releases the active tab's lock
 //  [4]   (separator)                  Empty name → Notepad++ renders a line
 //  [5]   Show Status                  Message box listing all locked files
 //  [6]   (separator)                  Empty name → Notepad++ renders a line
-//  [7]   Add Read-only                Toggles FILE_ATTRIBUTE_READONLY on locked files
+//  [7]   Add Read-only                Toggles FILE_ATTRIBUTE_READONLY on locked files; persisted to registry
 //  [8]   (separator)                  Empty name → Notepad++ renders a line
-//  [9]   Remember Options             Persists g_lockingEnabled + g_addReadOnly to registry
-// [10]   (separator)                  Empty name → Notepad++ renders a line
-// [11]   Enable Logging               Toggles diagnostic event logging
-// [12]   Show Log                     Displays captured events and live state
+//  [9]   Enable Logging               Toggles diagnostic event logging
+// [10]   Show Log                     Displays captured events and live state
 //
 // NOTEPAD++ MESSAGE USAGE
 // ───────────────────────
@@ -279,7 +277,7 @@ static const UINT WM_FL_CLEAR_RO = WM_APP + 3;
 // g_loggingEnabled
 //   When true, log() writes timestamped entries to g_log and OutputDebugStringW.
 //   When false, log() is a no-op.  The value is persisted in the registry
-//   independently of g_rememberOptions so it survives restarts unconditionally.
+//   so it survives restarts unconditionally.
 static bool g_loggingEnabled = false;
 
 // g_log — in-memory event log shown by Show Log.
@@ -367,11 +365,6 @@ static UINT g_lastToggleDocStatus = 0;
 //   the file is closed, or Notepad++ shuts down.
 static bool g_addReadOnly = false;
 
-// g_rememberOptions
-//   When true, g_lockingEnabled and g_addReadOnly are persisted to the registry
-//   whenever they change, and are restored at startup.
-static bool g_rememberOptions = false;
-
 // g_pendingInitialLock
 //   Set by loadSettings() when g_lockingEnabled is restored as true.
 //   The first WM_SETTEXT in titleBarHookProc after startup clears this flag and
@@ -442,9 +435,6 @@ static void saveSettings()
                           &hKey, nullptr) != ERROR_SUCCESS)
         return;
     DWORD v;
-    v = g_rememberOptions ? 1 : 0;
-    ::RegSetValueExW(hKey, L"RememberOptions", 0, REG_DWORD,
-                     reinterpret_cast<const BYTE*>(&v), sizeof(v));
     v = g_lockingEnabled ? 1 : 0;
     ::RegSetValueExW(hKey, L"LockingEnabled", 0, REG_DWORD,
                      reinterpret_cast<const BYTE*>(&v), sizeof(v));
@@ -461,28 +451,19 @@ static void loadSettings()
                         &hKey) != ERROR_SUCCESS)
         return;
     DWORD type = 0, size = sizeof(DWORD), v = 0;
-    if (::RegQueryValueExW(hKey, L"RememberOptions", nullptr, &type,
+    if (::RegQueryValueExW(hKey, L"LockingEnabled", nullptr, &type,
                            reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
         && type == REG_DWORD)
-        g_rememberOptions = (v != 0);
-    if (g_rememberOptions)
     {
-        v = 0; size = sizeof(DWORD);
-        if (::RegQueryValueExW(hKey, L"LockingEnabled", nullptr, &type,
-                               reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
-            && type == REG_DWORD)
-        {
-            g_lockingEnabled = (v != 0);
-            if (g_lockingEnabled)
-                g_pendingInitialLock = true;
-        }
-        v = 0; size = sizeof(DWORD);
-        if (::RegQueryValueExW(hKey, L"AddReadOnly", nullptr, &type,
-                               reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
-            && type == REG_DWORD)
-            g_addReadOnly = (v != 0);
+        g_lockingEnabled = (v != 0);
+        if (g_lockingEnabled)
+            g_pendingInitialLock = true;
     }
-    // LoggingEnabled is always loaded regardless of g_rememberOptions.
+    v = 0; size = sizeof(DWORD);
+    if (::RegQueryValueExW(hKey, L"AddReadOnly", nullptr, &type,
+                           reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
+        && type == REG_DWORD)
+        g_addReadOnly = (v != 0);
     v = 0; size = sizeof(DWORD);
     if (::RegQueryValueExW(hKey, L"LoggingEnabled", nullptr, &type,
                            reinterpret_cast<BYTE*>(&v), &size) == ERROR_SUCCESS
@@ -494,7 +475,7 @@ static void loadSettings()
 // ── saveLoggingRegistry ───────────────────────────────────────────────────────
 //
 // Persists only g_loggingEnabled to the registry.  Called from toggleLogging()
-// so the logging state survives restarts without requiring "Remember Options".
+// so the logging state survives Notepad++ restarts.
 // ─────────────────────────────────────────────────────────────────────────────
 static void saveLoggingRegistry()
 {
@@ -1929,7 +1910,7 @@ void pluginCleanUp()
 // ─────────────────────────────────────────────────────────────────────────────
 void commandMenuInit()
 {
-    ::lstrcpy(funcItem[0]._itemName, _T("Toggle File Locking (On/Off)"));
+    ::lstrcpy(funcItem[0]._itemName, _T("Enable File Locking"));
     funcItem[0]._pFunc      = toggleLocking;
     funcItem[0]._init2Check = g_lockingEnabled;
     funcItem[0]._pShKey     = nullptr;
@@ -1974,35 +1955,25 @@ void commandMenuInit()
     funcItem[8]._init2Check = false;
     funcItem[8]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[9]._itemName, _T("Remember Options"));
-    funcItem[9]._pFunc      = toggleRememberOptions;
-    funcItem[9]._init2Check = g_rememberOptions;
+    ::lstrcpy(funcItem[9]._itemName, _T("Enable Logging"));
+    funcItem[9]._pFunc      = toggleLogging;
+    funcItem[9]._init2Check = g_loggingEnabled;
     funcItem[9]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[10]._itemName, _T(""));
-    funcItem[10]._pFunc      = nullptr;
+    ::lstrcpy(funcItem[10]._itemName, _T("Show Log"));
+    funcItem[10]._pFunc      = showLog;
     funcItem[10]._init2Check = false;
     funcItem[10]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[11]._itemName, _T("Enable Logging"));
-    funcItem[11]._pFunc      = toggleLogging;
-    funcItem[11]._init2Check = g_loggingEnabled;
+    ::lstrcpy(funcItem[11]._itemName, _T(""));
+    funcItem[11]._pFunc      = nullptr;
+    funcItem[11]._init2Check = false;
     funcItem[11]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[12]._itemName, _T("Show Log"));
-    funcItem[12]._pFunc      = showLog;
+    ::lstrcpy(funcItem[12]._itemName, _T("About"));
+    funcItem[12]._pFunc      = showAbout;
     funcItem[12]._init2Check = false;
     funcItem[12]._pShKey     = nullptr;
-
-    ::lstrcpy(funcItem[13]._itemName, _T(""));
-    funcItem[13]._pFunc      = nullptr;
-    funcItem[13]._init2Check = false;
-    funcItem[13]._pShKey     = nullptr;
-
-    ::lstrcpy(funcItem[14]._itemName, _T("About"));
-    funcItem[14]._pFunc      = showAbout;
-    funcItem[14]._init2Check = false;
-    funcItem[14]._pShKey     = nullptr;
 }
 
 // ── commandMenuCleanUp ───────────────────────────────────────────────────────
@@ -2046,8 +2017,7 @@ void toggleLocking()
                         MF_BYCOMMAND | checkFlag);
     }
 
-    if (g_rememberOptions)
-        saveSettings();
+    saveSettings();
 
     if (!g_lockingEnabled)
     {
@@ -2597,8 +2567,7 @@ void toggleAddReadOnly()
                         MF_BYCOMMAND | checkFlag);
     }
 
-    if (g_rememberOptions)
-        saveSettings();
+    saveSettings();
 
     if (g_addReadOnly)
     {
@@ -2634,35 +2603,11 @@ void toggleAddReadOnly()
     }
 }
 
-// ── toggleRememberOptions ────────────────────────────────────────────────────
-//
-// Flips g_rememberOptions and persists the current option state to the registry.
-// When enabled, any subsequent toggle of g_lockingEnabled or g_addReadOnly also
-// writes to the registry.  The saved state is restored at startup via loadSettings().
-// When disabled, RememberOptions=0 is written so the next startup uses defaults.
-// ─────────────────────────────────────────────────────────────────────────────
-void toggleRememberOptions()
-{
-    g_rememberOptions = !g_rememberOptions;
-
-    HMENU hMenu = ::GetMenu(g_nppData._nppHandle);
-    if (hMenu != nullptr)
-    {
-        UINT checkFlag = g_rememberOptions ? MF_CHECKED : MF_UNCHECKED;
-        ::CheckMenuItem(hMenu,
-                        static_cast<UINT>(funcItem[9]._cmdID),
-                        MF_BYCOMMAND | checkFlag);
-    }
-
-    saveSettings();
-}
-
 // ── toggleLogging ────────────────────────────────────────────────────────────
 //
 // Flips g_loggingEnabled.  When turned on, clears the old log and resets the
 // timestamp base so the new session starts fresh.  The state is written to the
-// registry unconditionally (independently of g_rememberOptions) so that the
-// logging preference survives Notepad++ restarts without needing "Remember Options".
+// registry so it survives Notepad++ restarts.
 // ─────────────────────────────────────────────────────────────────────────────
 void toggleLogging()
 {
@@ -2679,7 +2624,7 @@ void toggleLogging()
     {
         UINT checkFlag = g_loggingEnabled ? MF_CHECKED : MF_UNCHECKED;
         ::CheckMenuItem(hMenu,
-                        static_cast<UINT>(funcItem[11]._cmdID),
+                        static_cast<UINT>(funcItem[9]._cmdID),
                         MF_BYCOMMAND | checkFlag);
     }
 

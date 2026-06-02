@@ -45,23 +45,21 @@ const TCHAR PLUGIN_NAME[] = _T("ExclusiveFileLock");
 // separator lines.  Update this constant whenever you add or remove a command.
 //
 // Current menu layout:
-//   [0] Toggle File Locking (On/Off)   ← master on/off toggle
+//   [0] Enable File Locking            ← master on/off toggle (persisted to registry)
 //   [1] ---                            ← separator
 //   [2] Lock Current File              ← manually lock active tab
 //   [3] Unlock Current File            ← manually unlock active tab
 //   [4] ---                            ← separator
 //   [5] Show Status                    ← show all currently-locked files
 //   [6] ---                            ← separator
-//   [7] Add Read-only                  ← set FILE_ATTRIBUTE_READONLY on locked files
+//   [7] Add Read-only                  ← set FILE_ATTRIBUTE_READONLY on locked files (persisted)
 //   [8] ---                            ← separator
-//   [9] Remember Options               ← persist toggle states across restarts
-//  [10] ---                            ← separator
-//  [11] Enable Logging                 ← capture diagnostic events to in-memory log
-//  [12] Show Log                       ← display captured events and live state
-//  [13] ---                            ← separator
-//  [14] About                          ← version, developer, links
+//   [9] Enable Logging                 ← capture diagnostic events to in-memory log
+//  [10] Show Log                       ← display captured events and live state
+//  [11] ---                            ← separator
+//  [12] About                          ← version, developer, links
 //
-const int nbFunc = 15;
+const int nbFunc = 13;
 
 //--------------------------------------------//
 //-- STEP 3. CUSTOMIZE YOUR PLUGIN COMMANDS --//
@@ -85,9 +83,6 @@ void showLockStatus();
 
 // Toggles the "add read-only attribute" option on locked files.
 void toggleAddReadOnly();
-
-// Toggles persistent storage of plugin option states across restarts.
-void toggleRememberOptions();
 
 // Toggles diagnostic event logging on or off (always persisted across restarts).
 void toggleLogging();
