@@ -375,11 +375,18 @@ static bool g_pendingInitialLock = false;
 
 // g_nppActive
 //   Tracks whether Notepad++ currently has the foreground focus.
-//   FILE_ATTRIBUTE_READONLY is only applied to locked files while g_nppActive is FALSE.
-//   While Notepad++ is focused, the attribute stays clear so saves and tab switches
-//   never trigger the file-monitor cycle that causes grey icons and save failures.
+//   Used to decide whether the active tab's FILE_ATTRIBUTE_READONLY should be set.
+//   While focused, the active tab's attribute stays clear; background tabs are always
+//   protected.  When focus is lost, the active tab's attribute is also set.
 //   Initialized to true: Notepad++ is assumed focused at startup.
 static bool g_nppActive = true;
+
+// g_activeTabPath
+//   The absolute path of the tab currently active in Notepad++.
+//   Updated on every WM_SETTEXT that fires outside enumeration mode.
+//   Used by applyReadOnly() so that the active tab's file is kept writable while
+//   Notepad++ is focused, while all background tabs get FILE_ATTRIBUTE_READONLY set.
+static std::wstring g_activeTabPath;
 
 // g_pendingBufferId — buffer ID saved from NPPN_BUFFERACTIVATED before the
 // title bar updates.  Correlated with the path in the next WM_SETTEXT so
@@ -670,12 +677,10 @@ static void applyReadOnly(const std::wstring& path)
     {
         g_pendingRestorePaths.insert(path);
         savePendingRestoreRegistry();
-        // Only set FILE_ATTRIBUTE_READONLY on disk when Notepad++ does not have focus.
-        // While Notepad++ is focused, leaving the attribute clear prevents the
-        // file-monitor cycle (attr set → monitor fires → buffer._isReadOnly=true →
-        // grey icon + save failures).  The attribute is applied when Notepad++
-        // loses focus (WA_INACTIVE handler) and cleared when it regains focus.
-        if (!g_nppActive)
+        // Set FILE_ATTRIBUTE_READONLY immediately for background tabs.
+        // Only defer (keep clear) when Notepad++ is focused AND this is the active tab —
+        // the active tab stays writable so saves and the file-monitor cycle work normally.
+        if (!g_nppActive || path != g_activeTabPath)
             ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
     }
 }
@@ -1197,25 +1202,26 @@ static LRESULT CALLBACK cmdHookProc(int nCode, WPARAM wParam, LPARAM lParam)
             else
             {
                 g_nppActive = true;
-                log(L"FOCUS GAINED: Notepad++ gaining focus (WA=%u) — clearing FILE_ATTRIBUTE_READONLY", activationState);
-                if (g_addReadOnly && !g_pendingRestorePaths.empty())
+                log(L"FOCUS GAINED: Notepad++ gaining focus (WA=%u) — clearing FILE_ATTRIBUTE_READONLY for active tab only", activationState);
+                if (g_addReadOnly && !g_activeTabPath.empty()
+                    && g_pendingRestorePaths.count(g_activeTabPath))
                 {
-                    for (const auto& path : g_pendingRestorePaths)
+                    // Only the active tab's attribute is cleared on focus gain.
+                    // Background tabs keep their read-only protection at all times.
+                    DWORD attrs = ::GetFileAttributesW(g_activeTabPath.c_str());
+                    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
                     {
-                        DWORD attrs = ::GetFileAttributesW(path.c_str());
-                        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
-                            ::SetFileAttributesW(path.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+                        ::SetFileAttributesW(g_activeTabPath.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+                        log(L"WH_CALLWNDPROC WA_ACTIVE: FILE_ATTRIBUTE_READONLY cleared for '%s'",
+                            g_activeTabPath.c_str());
                     }
-                    log(L"WH_CALLWNDPROC WA_ACTIVE: FILE_ATTRIBUTE_READONLY cleared on %zu file(s)",
-                        g_pendingRestorePaths.size());
                 }
             }
         }
 
         // WM_NOTIFY (TCN_SELCHANGE) — user is switching tabs.
-        // No longer touches FILE_ATTRIBUTE_READONLY here: the attribute is managed
-        // purely by focus changes (WA_INACTIVE/WA_ACTIVE).  Tab switches happen
-        // only while Notepad++ is focused, so the attribute is already clear.
+        // FILE_ATTRIBUTE_READONLY for the old/new tab is managed in titleBarHookProc
+        // WM_SETTEXT (after the title bar reflects the new active file).
         if (p->hwnd    == g_nppData._nppHandle
             && p->message == WM_NOTIFY
             && !g_enumerating
@@ -1719,6 +1725,46 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
             // Determine the path now shown in the (just-updated) title bar.
             std::wstring currentPath = getCurrentFilePath();
 
+            // Update the active-tab tracker and manage FILE_ATTRIBUTE_READONLY per tab.
+            // The active tab's file is kept writable while Notepad++ is focused so that
+            // saves and the Notepad++ file-monitor behave normally.  All background tabs'
+            // files have FILE_ATTRIBUTE_READONLY set as external protection at all times.
+            // We update g_activeTabPath early so that any lockPath() calls below
+            // (auto-lock, rename/delete resolution) see the correct active path and
+            // applyReadOnly() does not incorrectly set the attribute on the new active tab.
+            if (!g_enumerating)
+            {
+                std::wstring previousPath = g_activeTabPath;
+                g_activeTabPath = currentPath;
+
+                if (g_addReadOnly && g_nppActive
+                    && previousPath != currentPath
+                    && g_preRenameLockedPaths.empty()
+                    && g_preDeleteLockedPaths.empty())
+                {
+                    // The previously active tab is now a background tab — protect it.
+                    if (!previousPath.empty() && g_pendingRestorePaths.count(previousPath))
+                    {
+                        DWORD attrs = ::GetFileAttributesW(previousPath.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_READONLY))
+                        {
+                            ::SetFileAttributesW(previousPath.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
+                            log(L"TAB SWITCH: set RO on previous tab '%s'", previousPath.c_str());
+                        }
+                    }
+                    // The newly active tab — remove read-only so Notepad++ sees it as writable.
+                    if (!currentPath.empty() && g_pendingRestorePaths.count(currentPath))
+                    {
+                        DWORD attrs = ::GetFileAttributesW(currentPath.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY))
+                        {
+                            ::SetFileAttributesW(currentPath.c_str(), attrs & ~FILE_ATTRIBUTE_READONLY);
+                            log(L"TAB SWITCH: cleared RO on new active tab '%s'", currentPath.c_str());
+                        }
+                    }
+                }
+            }
+
             if (!g_preDeleteLockedPaths.empty())
             {
                 // Check whether any of the previously-locked files is now gone.
@@ -1827,12 +1873,10 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
                     (unsigned long long)bid);
             }
 
-            // FILE_ATTRIBUTE_READONLY is managed exclusively by focus events (WA_INACTIVE /
-            // WA_ACTIVE).  Do NOT restore it here: restoring after every WM_SETTEXT (tab
-            // switch, save) triggers the file-monitor cycle which causes grey icons and
-            // save failures for non-active buffers.  The attribute is already clear while
-            // Notepad++ is focused, which is the only time WM_SETTEXT fires.
-            g_saveClearedPaths.clear();  // no longer needed — no WM_SETTEXT restore
+            // FILE_ATTRIBUTE_READONLY for the active tab is cleared by the tab-switch
+            // block above (per-tab) and by the WA_ACTIVE handler (on focus regain).
+            // WA_INACTIVE sets it on all files including the active tab.
+            g_saveClearedPaths.clear();
         }
 
         // NOTE: WM_ACTIVATE fires when the rename dialog closes, BEFORE
@@ -1841,11 +1885,9 @@ static LRESULT CALLBACK titleBarHookProc(int nCode, WPARAM wParam, LPARAM lParam
         // WM_SETTEXT block above once g_renameOpDispatched is set.
 
         // WM_ACTIVATE (WA_ACTIVE) — Notepad++ has processed the activation.
-        // FILE_ATTRIBUTE_READONLY was already cleared in WH_CALLWNDPROC (before
-        // WM_ACTIVATE ran).  Now call "Clear Read-Only Flag" to clear buffer._isReadOnly
-        // which the file monitor set during our inactive period.
-        // Do NOT restore FILE_ATTRIBUTE_READONLY here — it stays clear while Notepad++
-        // is focused (managed by WA_INACTIVE only).
+        // FILE_ATTRIBUTE_READONLY for the active tab was already cleared in WH_CALLWNDPROC.
+        // Now call "Clear Read-Only Flag" to clear buffer._isReadOnly which the file
+        // monitor may have set on the active tab while Notepad++ was inactive.
         if (g_addReadOnly
             && p->hwnd    == g_nppData._nppHandle
             && p->message == WM_ACTIVATE
