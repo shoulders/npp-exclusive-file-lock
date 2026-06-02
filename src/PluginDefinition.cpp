@@ -677,9 +677,11 @@ static void applyReadOnly(const std::wstring& path)
     {
         g_pendingRestorePaths.insert(path);
         savePendingRestoreRegistry();
-        // Set FILE_ATTRIBUTE_READONLY immediately for background tabs.
-        // Only defer (keep clear) when Notepad++ is focused AND this is the active tab —
-        // the active tab stays writable so saves and the file-monitor cycle work normally.
+        // Set read-only immediately, except when Notepad++ is focused AND this is the
+        // active tab (the active tab stays writable to prevent file-monitor interference).
+        // During session restore, each file is temporarily "active" when first locked,
+        // so the active-tab exception would fire for every file.  The WM_FL_LOCK_ALL
+        // handler runs a correction sweep afterwards to cover those skipped files.
         if (!g_nppActive || path != g_activeTabPath)
             ::SetFileAttributesW(path.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
     }
@@ -1420,9 +1422,28 @@ static LRESULT CALLBACK getMsgHookProc(int nCode, WPARAM wParam, LPARAM lParam)
                 for (const auto& p : allPaths)
                     lockPath(p);
 
+                // Correction sweep: during session restore, files are activated one-by-one
+                // so each was temporarily "active" when first locked, causing applyReadOnly
+                // to skip setting FILE_ATTRIBUTE_READONLY on them.  Apply it now to every
+                // locked file that is NOT the current active tab.
+                if (g_addReadOnly && !g_pendingRestorePaths.empty())
+                {
+                    int swept = 0;
+                    for (const auto& p : g_pendingRestorePaths)
+                    {
+                        if (p == g_activeTabPath) continue;
+                        DWORD attrs = ::GetFileAttributesW(p.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_READONLY))
+                        {
+                            ::SetFileAttributesW(p.c_str(), attrs | FILE_ATTRIBUTE_READONLY);
+                            ++swept;
+                        }
+                    }
+                    log(L"WM_FL_LOCK_ALL: RO sweep applied to %d background file(s)", swept);
+                }
+
                 log(L"WM_FL_LOCK_ALL: locked %zu files  addRO=%d  pending=%zu",
                     allPaths.size(), (int)g_addReadOnly, g_pendingRestorePaths.size());
-                // Fix startup active tab via the proper API.
                 std::wstring activePath = getCurrentFilePath();
                 if (!activePath.empty()) clearSciReadOnly(activePath);
             }

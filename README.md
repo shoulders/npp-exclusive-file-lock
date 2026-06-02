@@ -52,17 +52,15 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 
 | Menu item | What it does |
 | --- | --- |
-| **Toggle File Locking (On/Off)** | Master switch. Shows a ✔ check-mark when enabled. Turning OFF releases all currently held locks immediately. |
+| **Enable File Locking** | Master switch. Shows a ✔ check-mark when enabled. Turning OFF releases all currently held locks immediately. State is saved to the registry automatically and restored on the next Notepad++ start. |
 | *(separator)* | — |
 | **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
 | **Unlock Current File** | Releases the lock on the active tab's file without closing the tab. |
 | **Show Status** | Concise summary of the current state. Shows option settings (locking, Add Read-only, Logging) and three file lists: **Locked files**, **Read-only files**, and **Pseudo Read-only files** (see [*File categories in Show Status*](#file-categories-in-show-status)). |
 | *(separator)* | — |
-| **Add Read-only** | When enabled (✔), also sets `FILE_ATTRIBUTE_READONLY` on each locked file. See [*Add Read-only option*](#add-read-only-option) below. |
+| **Add Read-only** | When enabled (✔), also sets `FILE_ATTRIBUTE_READONLY` on each locked file. State is saved to the registry automatically. See [*Add Read-only option*](#add-read-only-option) below. |
 | *(separator)* | — |
-| **Remember Options** | When enabled (✔), persists **Toggle File Locking** and **Add Read-only** states to the registry so they are restored after a restart. |
-| *(separator)* | — |
-| **Enable Logging** | When enabled (✔), captures timestamped diagnostic events to an in-memory log. Enabling clears any previous log and starts fresh. The on/off state is always saved to the registry (independently of **Remember Options**). See [*Diagnostics and logging*](#diagnostics-and-logging) below. |
+| **Enable Logging** | When enabled (✔), captures timestamped diagnostic events to an in-memory log. Enabling clears any previous log and starts fresh. State is saved to the registry and survives Notepad++ restarts. See [*Diagnostics and logging*](#diagnostics-and-logging) below. |
 | **Show Log** | Displays the captured event log together with a live diagnostic snapshot: Scintilla read-only state, subclass intercept counters, attribute tracking tables, and a Scintilla writability test. |
 
 ---
@@ -99,46 +97,41 @@ overwriting a read-only file.
 
 | Event | Behaviour |
 | --- | --- |
-| File locked (auto or manual) | Original attribute saved internally.  `FILE_ATTRIBUTE_READONLY` is applied to disk the next time Notepad++ loses focus (see *When the attribute is applied* below). |
-| File saved from Notepad++ | `FILE_ATTRIBUTE_READONLY` is **temporarily cleared** before Notepad++ writes, allowing the save to succeed.  The flag is **not** immediately re-applied after the save — it remains clear until Notepad++ next loses focus. |
+| File locked (auto or manual) | Original attribute saved internally. `FILE_ATTRIBUTE_READONLY` is set on disk immediately — **except** for the currently active tab, whose attribute is deferred until Notepad++ loses focus (see *Per-tab read-only behaviour* below). |
+| File saved from Notepad++ | `FILE_ATTRIBUTE_READONLY` is **temporarily cleared** before Notepad++ writes, allowing the save to succeed. The flag is re-applied the next time focus leaves Notepad++ or you switch away from that tab. |
 | File unlocked (any reason) | The original attribute value is restored exactly as it was before the plugin touched it. |
 | Tab closed | Original attributes restored and lock released. |
-| **Toggle File Locking** turned OFF | All locks released; all attributes restored. |
+| **Enable File Locking** turned OFF | All locks released; all attributes restored. |
 | **Add Read-only** turned OFF | All attributes restored; locks remain held. |
 | Notepad++ shutdown | All locks released; all attributes restored. |
 
-### When the attribute is applied — and the brief unprotected window
+### Per-tab read-only behaviour
 
-`FILE_ATTRIBUTE_READONLY` is **not** set while Notepad++ has focus.  It is applied
-only when Notepad++ loses focus, and cleared again as soon as Notepad++ regains
-focus.  This is deliberate: setting the attribute while Notepad++ is focused
-triggers its internal file monitor, which marks the buffer as read-only and causes
-grey icons, blocked saves, and edit failures (see *How Notepad++ read-only state
-works internally* below for the full chain).  Deferring the attribute to focus loss
-entirely avoids that cycle.
+The plugin manages `FILE_ATTRIBUTE_READONLY` on a per-tab basis while Notepad++ is focused:
 
-**What this means in practice:**
+- **All tabs except the active one** have `FILE_ATTRIBUTE_READONLY` set on disk immediately and at all times while locked.  These files are fully protected from external writes even while you are working in Notepad++.
+- **The active tab** has `FILE_ATTRIBUTE_READONLY` **cleared** while Notepad++ is focused.  This prevents Notepad++'s internal file monitor from marking the buffer read-only (which would cause grey icons, blocked saves, and edit failures — see *How Notepad++ read-only state works internally* below).  While active, the exclusive Win32 lock still protects the file.
 
-- While you are actively working in Notepad++ (including immediately after a save
-  and while you continue typing), `FILE_ATTRIBUTE_READONLY` is **not** set on disk.
-- The attribute is re-applied automatically the next time you move focus away from
-  Notepad++ — for example, by switching to another application window, opening the
-  Start menu, or clicking on the desktop.
-- From observation, actions that typically precede or coincide with a focus change
-  — switching tabs and then switching away, triggering certain menu dialogs, or
-  saving and then moving to another application — all result in the flag being
-  present when an external tool next reads the file attributes.
+**What happens on each event:**
 
-**Security note:** During the focused window, `FILE_ATTRIBUTE_READONLY` is not
-present on disk, so a background process could theoretically write to the file
-without the flag stopping it.  However, the exclusive Win32 lock (`CreateFile`
-with no `FILE_SHARE_DELETE`) remains active at all times regardless of the
-attribute state.  That lock is the **primary protection** this plugin provides: it
-blocks any process that requests write access through the standard Windows API.
-The `FILE_ATTRIBUTE_READONLY` flag is a **secondary, advisory layer** aimed at
-applications that bypass share-mode locking (see *Add Read-only option* above) —
-it is not a security boundary and is not intended to protect against system-level
-or privileged access.
+| Event | Effect on FILE_ATTRIBUTE_READONLY |
+| --- | --- |
+| Tab switch (click another tab) | Old active tab: attribute **set**. New active tab: attribute **cleared**. |
+| Notepad++ loses focus | Active tab: attribute **set** — now ALL open locked files are protected. |
+| Notepad++ regains focus | Active tab: attribute **cleared**. Background tabs unchanged (stay protected). |
+| Notepad++ starts with locking and Add Read-only enabled | All background tabs: attribute set immediately. Active tab: attribute cleared. (See *Startup behaviour* below.) |
+
+**Security note:** While the active tab's `FILE_ATTRIBUTE_READONLY` is clear, a background process could theoretically write to it without the flag stopping it.  However, the exclusive Win32 lock (`CreateFile` with no `FILE_SHARE_DELETE`) remains active at all times.  That lock is the **primary protection**: it blocks any process that requests write access through the standard Windows API.  The `FILE_ATTRIBUTE_READONLY` flag is a **secondary, advisory layer** aimed at applications that bypass share-mode locking — it is not a security boundary and is not intended to protect against system-level or privileged access.
+
+### Startup behaviour and the session-restore sweep
+
+When Notepad++ starts with **Enable File Locking** and **Add Read-only** both enabled (as saved from the previous session), the plugin needs to lock and protect all files that were open when Notepad++ last closed.
+
+**The challenge:** Notepad++ restores its session by activating files one-by-one.  For each file, the active-tab rule applies at the moment of locking — so the attribute is not set.  By the time the lock-all phase is complete, every file has been temporarily active and all have had their attribute skipped.
+
+**The fix — correction sweep:** After all session files have been locked, the plugin runs a sweep over every locked writable file and applies `FILE_ATTRIBUTE_READONLY` to each one that is **not** the current active tab.  This corrects the per-file misses from session restore.
+
+The net result is indistinguishable from manual locking: on startup all background tabs are read-only and the active tab is writable.
 
 ### Limitations
 
@@ -175,8 +168,7 @@ disabled — all `log()` calls are no-ops.
 
 Open **Plugins > ExclusiveFileLock > Enable Logging**.  A ✔ check-mark appears
 and the log is cleared so the new session starts from a clean slate.  The
-preference is stored in the registry unconditionally (independently of
-**Remember Options**), so the setting survives Notepad++ restarts.
+preference is stored in the registry so the setting survives Notepad++ restarts.
 
 ### Reading the log
 
