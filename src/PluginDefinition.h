@@ -58,8 +58,10 @@ const TCHAR PLUGIN_NAME[] = _T("ExclusiveFileLock");
 //  [10] ---                            ← separator
 //  [11] Enable Logging                 ← capture diagnostic events to in-memory log
 //  [12] Show Log                       ← display captured events and live state
+//  [13] ---                            ← separator
+//  [14] About                          ← version, developer, links
 //
-const int nbFunc = 13;
+const int nbFunc = 15;
 
 //--------------------------------------------//
 //-- STEP 3. CUSTOMIZE YOUR PLUGIN COMMANDS --//
@@ -92,6 +94,9 @@ void toggleLogging();
 
 // Displays the diagnostic event log and live Scintilla state.
 void showLog();
+
+// Displays the About dialog (version, developer, website, GitHub, licence).
+void showAbout();
 
 //----------------------------------------------//
 //-- STEP 4. DEFINE YOUR ASSOCIATED FUNCTIONS --//

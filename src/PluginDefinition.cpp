@@ -107,6 +107,12 @@
 #include <restartmanager.h>
 #pragma comment(lib, "rstrtmgr.lib")
 
+// About dialog resources and version reading
+#include "resource.h"
+#include <shellapi.h>           // ShellExecuteW
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "version.lib") // GetFileVersionInfoW / VerQueryValueW
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SECTION 1 – Plugin-wide state
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1987,6 +1993,16 @@ void commandMenuInit()
     funcItem[12]._pFunc      = showLog;
     funcItem[12]._init2Check = false;
     funcItem[12]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[13]._itemName, _T(""));
+    funcItem[13]._pFunc      = nullptr;
+    funcItem[13]._init2Check = false;
+    funcItem[13]._pShKey     = nullptr;
+
+    ::lstrcpy(funcItem[14]._itemName, _T("About"));
+    funcItem[14]._pFunc      = showAbout;
+    funcItem[14]._init2Check = false;
+    funcItem[14]._pShKey     = nullptr;
 }
 
 // ── commandMenuCleanUp ───────────────────────────────────────────────────────
@@ -2668,6 +2684,99 @@ void toggleLogging()
     }
 
     saveLoggingRegistry();
+}
+
+// ── getPluginVersion ─────────────────────────────────────────────────────────
+//
+// Reads the plugin's FILEVERSION from the DLL's own VERSIONINFO resource and
+// returns it as a "MAJOR.MINOR.PATCH" wide string.
+// The version is defined once in resource.h (VERSION_MAJOR / MINOR / PATCH /
+// BUILD) and embedded into the DLL by FileLockPlugin.rc at build time.
+// ─────────────────────────────────────────────────────────────────────────────
+static std::wstring getPluginVersion()
+{
+    wchar_t dllPath[MAX_PATH] = {};
+    ::GetModuleFileNameW(g_hDllInstance, dllPath, MAX_PATH);
+
+    DWORD dummy = 0;
+    DWORD infoSize = ::GetFileVersionInfoSizeW(dllPath, &dummy);
+    if (!infoSize)
+        return L"unknown";
+
+    std::vector<BYTE> buf(infoSize);
+    if (!::GetFileVersionInfoW(dllPath, 0, infoSize, buf.data()))
+        return L"unknown";
+
+    VS_FIXEDFILEINFO* pfi = nullptr;
+    UINT len = 0;
+    if (!::VerQueryValueW(buf.data(), L"\\",
+                          reinterpret_cast<LPVOID*>(&pfi), &len) || !pfi)
+        return L"unknown";
+
+    wchar_t ver[32] = {};
+    ::_snwprintf_s(ver, _countof(ver), _TRUNCATE,
+                   L"%u.%u.%u",
+                   HIWORD(pfi->dwFileVersionMS),
+                   LOWORD(pfi->dwFileVersionMS),
+                   HIWORD(pfi->dwFileVersionLS));
+    return ver;
+}
+
+// ── aboutDlgProc ─────────────────────────────────────────────────────────────
+//
+// Dialog procedure for IDD_ABOUT.
+//
+// WM_INITDIALOG: reads the DLL version and populates IDC_VERSION.
+// WM_NOTIFY / NM_CLICK or NM_RETURN: a SysLink was clicked; opens the URL
+//   from NMLINK.item.szUrl in the user's default browser via ShellExecuteW.
+// ─────────────────────────────────────────────────────────────────────────────
+static INT_PTR CALLBACK aboutDlgProc(HWND hDlg, UINT msg,
+                                      WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_INITDIALOG:
+    {
+        std::wstring ver = getPluginVersion();
+        ::SetDlgItemTextW(hDlg, IDC_VERSION, ver.c_str());
+        return TRUE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
+        {
+            ::EndDialog(hDlg, 0);
+            return TRUE;
+        }
+        break;
+    case WM_NOTIFY:
+    {
+        const NMHDR* pnm = reinterpret_cast<const NMHDR*>(lParam);
+        if (pnm->code == NM_CLICK || pnm->code == NM_RETURN)
+        {
+            const NMLINK* pnml = reinterpret_cast<const NMLINK*>(lParam);
+            ::ShellExecuteW(nullptr, L"open",
+                            pnml->item.szUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            return TRUE;
+        }
+        break;
+    }
+    }
+    return FALSE;
+}
+
+// ── showAbout ─────────────────────────────────────────────────────────────────
+//
+// Opens the About dialog (IDD_ABOUT from FileLockPlugin.rc).
+// Shows plugin version (read from DLL VERSIONINFO at runtime), developer,
+// and three clickable SysLink controls for website, GitHub, and licence.
+// ─────────────────────────────────────────────────────────────────────────────
+void showAbout()
+{
+    ::DialogBoxParamW(g_hDllInstance,
+                      MAKEINTRESOURCEW(IDD_ABOUT),
+                      g_nppData._nppHandle,
+                      aboutDlgProc,
+                      0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

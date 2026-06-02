@@ -1,0 +1,86 @@
+// FileLockPlugin.rc
+// Windows resource file for ExclusiveFileLock Notepad++ Plugin.
+//
+// VERSION
+//   To update the plugin version, edit the four VERSION_* macros in resource.h.
+//   The numbers here feed both the VERSIONINFO block (visible in Windows
+//   Explorer > file Properties > Details) and the About dialog at runtime
+//   (read via GetFileVersionInfoW / VerQueryValueW).
+//
+// ABOUT DIALOG
+//   Developer name, website URL, GitHub URL, and licence URL are defined
+//   directly in the IDD_ABOUT template below.
+
+#include "resource.h"
+
+// ── File version information ──────────────────────────────────────────────────
+//
+// FILEOS   0x00040004  VOS__WINDOWS32
+// FILETYPE 0x00000002  VFT_DLL
+//
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,VERSION_BUILD
+ PRODUCTVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,VERSION_BUILD
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         0x40004L
+ FILETYPE       0x2L
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "shoulders (Jon Brown)"
+            VALUE "FileDescription",  "ExclusiveFileLock - Notepad++ Plugin"
+            VALUE "FileVersion",      VERSION_STR
+            VALUE "InternalName",     "FileLockPlugin"
+            VALUE "LegalCopyright",   "GNU General Public License v3.0"
+            VALUE "OriginalFilename", "FileLockPlugin.dll"
+            VALUE "ProductName",      "ExclusiveFileLock"
+            VALUE "ProductVersion",   VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+// ── About dialog ──────────────────────────────────────────────────────────────
+//
+// SysLink style: WS_CHILD(0x40000000)|WS_VISIBLE(0x10000000)|WS_TABSTOP(0x00010000)
+//   = 0x50010000
+//
+// Clicking any <a href="..."> link fires WM_NOTIFY / NM_CLICK; the handler in
+// aboutDlgProc() reads NMLINK.item.szUrl and opens it with ShellExecuteW.
+//
+IDD_ABOUT DIALOGEX 0, 0, 230, 115
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About"
+FONT 8, "MS Shell Dlg", 0, 0, 0x1
+BEGIN
+    LTEXT      "ExclusiveFileLock - Notepad++ Plugin",
+               IDC_STATIC,   8,  8, 214, 10
+
+    LTEXT      "Version:",   IDC_STATIC,   8, 26,  56, 10
+    LTEXT      "",           IDC_VERSION,  68, 26, 154, 10
+
+    LTEXT      "Developer:", IDC_STATIC,   8, 40,  56, 10
+    LTEXT      "shoulders (Jon Brown)",
+               IDC_STATIC,  68, 40, 154, 10
+
+    LTEXT      "Website:",   IDC_STATIC,   8, 54,  56, 10
+    CONTROL    "<a href=""https://quantumwarp.com/"">quantumwarp.com</a>",
+               IDC_WEBSITE, "SysLink",  0x50010000, 68, 52, 154, 12
+
+    LTEXT      "GitHub:",    IDC_STATIC,   8, 68,  56, 10
+    CONTROL    "<a href=""https://github.com/shoulders/npp-exclusive-file-lock"">GitHub Repository</a>",
+               IDC_GITHUB,  "SysLink",  0x50010000, 68, 66, 154, 12
+
+    LTEXT      "License:",   IDC_STATIC,   8, 82,  56, 10
+    CONTROL    "<a href=""https://choosealicense.com/licenses/gpl-3.0/"">GNU GPLv3</a>",
+               IDC_LICENSE, "SysLink",  0x50010000, 68, 80, 154, 12
+
+    DEFPUSHBUTTON "OK",      IDOK, 90, 98, 50, 14
+END

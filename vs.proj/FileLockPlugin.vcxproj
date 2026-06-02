@@ -81,6 +81,10 @@
 
   <!-- ── Compiler settings (both platforms) ── -->
   <ItemDefinitionGroup>
+    <!-- Resource compiler: needs src\ on the include path to resolve resource.h -->
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
     <ClCompile>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalIncludeDirectories>$(ProjectDir)..\src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -117,6 +121,12 @@
     <ClInclude Include="..\src\Scintilla.h" />
     <ClInclude Include="..\src\Sci_Position.h" />
     <ClInclude Include="..\src\Notepad_plus_msgs.h" />
+    <ClInclude Include="..\src\resource.h" />
+  </ItemGroup>
+
+  <!-- ── Resource files ── -->
+  <ItemGroup>
+    <ResourceCompile Include="..\src\FileLockPlugin.rc" />
   </ItemGroup>
 
   <!-- ── Module definition ── -->
