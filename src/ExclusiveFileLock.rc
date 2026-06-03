@@ -1,5 +1,5 @@
-// FileLockPlugin.rc
-// Windows resource file for ExclusiveFileLock Notepad++ Plugin.
+// ExclusiveFileLock.rc
+// Windows resource file for Exclusive File Lock Notepad++ Plugin.
 //
 // VERSION
 //   To update the plugin version, edit the four VERSION_* macros in resource.h.
@@ -32,13 +32,13 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName",      "Jon Brown (shoulders)"
-            VALUE "FileDescription",  "ExclusiveFileLock - Notepad++ Plugin"
+            VALUE "FileDescription",  "Exclusive File Lock - Notepad++ Plugin"
             VALUE "FileVersion",      VERSION_STR
-            VALUE "InternalName",     "FileLockPlugin"
+            VALUE "InternalName",     "ExclusiveFileLock"
             VALUE "LegalCopyright",   "Copyright (C) 2026 Jon Brown, All rights reserved."
             VALUE "License",          "GNU General Public License v3.0"
-            VALUE "OriginalFilename", "FileLockPlugin.dll"
-            VALUE "ProductName",      "ExclusiveFileLock"
+            VALUE "OriginalFilename", "ExclusiveFileLock.dll"
+            VALUE "ProductName",      "Exclusive File Lock"
             VALUE "ProductVersion",   VERSION_STR
             VALUE "Author",           "Jon Brown (shoulders)"
             VALUE "URL",              "https://quantumwarp.com/"
@@ -64,7 +64,7 @@ STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMEN
 CAPTION "About"
 FONT 8, "MS Shell Dlg", 0, 0, 0x1
 BEGIN
-    LTEXT      "ExclusiveFileLock - Notepad++ Plugin",
+    LTEXT      "Exclusive File Lock - Notepad++ Plugin",
                IDC_STATIC,   8,  8, 214, 10
 
     LTEXT      "Version:",   IDC_STATIC,   8, 26,  56, 10

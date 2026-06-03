@@ -1,6 +1,6 @@
 // PluginDefinition.cpp
 //
-// FileLock – Notepad++ Plugin
+// Exclusive File Lock – Notepad++ Plugin
 //
 // Implements all plugin logic:
 //   • The six mandatory Notepad++ plugin exports (DLL interface)
@@ -394,7 +394,7 @@ static std::wstring g_activeTabPath;
 static uptr_t g_pendingBufferId = 0;
 
 // Registry key used to persist plugin option states.
-static const wchar_t* REG_KEY = L"Software\\FileLockPlugin";
+static const wchar_t* REG_KEY = L"Software\\ExclusiveFileLock";
 
 // g_readOnlyOriginals
 //   For each path where we applied FILE_ATTRIBUTE_READONLY, stores the
@@ -499,7 +499,7 @@ static void saveLoggingRegistry()
 
 // ── savePendingRestoreRegistry ────────────────────────────────────────────────
 //
-// Writes g_pendingRestorePaths to HKCU\Software\FileLockPlugin\PendingRestore
+// Writes g_pendingRestorePaths to HKCU\Software\ExclusiveFileLock\PendingRestore
 // as REG_MULTI_SZ so crash recovery can find them at the next startup.
 // Deletes the value if the set is empty.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -803,16 +803,16 @@ static bool lockPath(const std::wstring& path)
             g_foreignOpenPaths.insert(path);
             std::wstringstream ss;
             ss << L"This file is already open in another application.\r\n"
-                  L"FileLock will not lock it or set it read-only.\r\n\r\n"
+                  L"Exclusive File Lock will not lock it or set it read-only.\r\n\r\n"
                << path << L"\r\n\r\n"
                   L"Opened by:";
             for (const auto& n : owners)
                 ss << L"\r\n  \x2022 " << n;
             ss << L"\r\n\r\n"
                   L"Close the other application and switch back to this tab\r\n"
-                  L"to allow FileLock to protect the file.";
+                  L"to allow Exclusive File Lock to protect the file.";
             ::MessageBoxW(g_nppData._nppHandle, ss.str().c_str(),
-                          L"FileLock \x2013 File In Use", MB_OK | MB_ICONWARNING);
+                          L"Exclusive File Lock \x2013 File In Use", MB_OK | MB_ICONWARNING);
         }
         return false;
     }
@@ -2088,7 +2088,7 @@ void toggleLocking()
         ::MessageBox(
             g_nppData._nppHandle,
             _T("File locking is now DISABLED.\r\nAll locks have been released."),
-            _T("FileLock"),
+            _T("Exclusive File Lock"),
             MB_OK | MB_ICONINFORMATION
         );
         return;
@@ -2120,7 +2120,7 @@ void toggleLocking()
         ::MessageBox(
             g_nppData._nppHandle,
             _T("File locking is now ENABLED.\r\nFiles you open will be locked exclusively."),
-            _T("FileLock"),
+            _T("Exclusive File Lock"),
             MB_OK | MB_ICONINFORMATION
         );
         return;
@@ -2130,7 +2130,7 @@ void toggleLocking()
     ::MessageBoxW(
         g_nppData._nppHandle,
         L"File locking is now ENABLED.\r\nOpened files and files you open will be locked exclusively.",
-        L"FileLock",
+        L"Exclusive File Lock",
         MB_OK | MB_ICONINFORMATION);
 
     for (const auto& p : toOffer)
@@ -2152,15 +2152,15 @@ void lockCurrentFile()
         ::MessageBox(g_nppData._nppHandle,
             _T("The active tab has no file on disk.\r\n"
                "(Unsaved or untitled document — save it first.)"),
-            _T("FileLock"), MB_OK | MB_ICONWARNING);
+            _T("Exclusive File Lock"), MB_OK | MB_ICONWARNING);
         return;
     }
 
     if (g_lockMap.count(path))
     {
-        std::wstring msg = L"This file is already locked by FileLock:\r\n" + path;
+        std::wstring msg = L"This file is already locked by Exclusive File Lock:\r\n" + path;
         ::MessageBoxW(g_nppData._nppHandle,
-            msg.c_str(), L"FileLock", MB_OK | MB_ICONINFORMATION);
+            msg.c_str(), L"Exclusive File Lock", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -2178,7 +2178,7 @@ void lockCurrentFile()
             ss << L"\r\n\r\n"
                   L"Close the other application first, then try again.";
             ::MessageBoxW(g_nppData._nppHandle, ss.str().c_str(),
-                          L"FileLock \x2013 File In Use", MB_OK | MB_ICONWARNING);
+                          L"Exclusive File Lock \x2013 File In Use", MB_OK | MB_ICONWARNING);
             return;
         }
         // Other app closed — clear the suppression flag so auto-lock resumes.
@@ -2201,7 +2201,7 @@ void lockCurrentFile()
             L"  • Insufficient permissions (try running Notepad++ as Administrator)\r\n"
             L"  • File is on a read-only volume or network share",
             path.c_str(), err);
-        ::MessageBoxW(g_nppData._nppHandle, msg, L"FileLock", MB_OK | MB_ICONERROR);
+        ::MessageBoxW(g_nppData._nppHandle, msg, L"Exclusive File Lock", MB_OK | MB_ICONERROR);
         return;
     }
 
@@ -2211,7 +2211,7 @@ void lockCurrentFile()
 
     std::wstring msg = L"File locked successfully:\r\n" + path;
     ::MessageBoxW(g_nppData._nppHandle,
-        msg.c_str(), L"FileLock", MB_OK | MB_ICONINFORMATION);
+        msg.c_str(), L"Exclusive File Lock", MB_OK | MB_ICONINFORMATION);
 }
 
 // ── unlockCurrentFile ────────────────────────────────────────────────────────
@@ -2227,15 +2227,15 @@ void unlockCurrentFile()
     {
         ::MessageBox(g_nppData._nppHandle,
             _T("The active tab has no file on disk."),
-            _T("FileLock"), MB_OK | MB_ICONWARNING);
+            _T("Exclusive File Lock"), MB_OK | MB_ICONWARNING);
         return;
     }
 
     if (!g_lockMap.count(path))
     {
         ::MessageBox(g_nppData._nppHandle,
-            _T("This file is not currently locked by FileLock."),
-            _T("FileLock"), MB_OK | MB_ICONINFORMATION);
+            _T("This file is not currently locked by Exclusive File Lock."),
+            _T("Exclusive File Lock"), MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -2243,7 +2243,7 @@ void unlockCurrentFile()
 
     std::wstring msg = L"Lock released for:\r\n" + path;
     ::MessageBoxW(g_nppData._nppHandle,
-        msg.c_str(), L"FileLock", MB_OK | MB_ICONINFORMATION);
+        msg.c_str(), L"Exclusive File Lock", MB_OK | MB_ICONINFORMATION);
 }
 
 // ── showLockStatus ───────────────────────────────────────────────────────────
@@ -2300,7 +2300,7 @@ void showLockStatus()
     }
 
     ::MessageBoxW(g_nppData._nppHandle,
-        ss.str().c_str(), L"FileLock \x2013 Status", MB_OK | MB_ICONINFORMATION);
+        ss.str().c_str(), L"Exclusive File Lock \x2013 Status", MB_OK | MB_ICONINFORMATION);
 }
 
 // ── Log dialog window procedure ───────────────────────────────────────────────
@@ -2537,7 +2537,7 @@ void showLog()
         wc.hInstance      = g_hDllInstance;
         wc.hbrBackground  = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
         wc.hCursor        = ::LoadCursorW(nullptr, IDC_ARROW);
-        wc.lpszClassName  = L"FileLockLogWnd";
+        wc.lpszClassName  = L"ExclusiveFileLockLogWnd";
         s_classReg = (::RegisterClassExW(&wc) != 0);
     }
 
@@ -2557,8 +2557,8 @@ void showLog()
 
     HWND hDlg = ::CreateWindowExW(
         WS_EX_DLGMODALFRAME,
-        L"FileLockLogWnd",
-        L"FileLock \x2013 Log",
+        L"ExclusiveFileLockLogWnd",
+        L"Exclusive File Lock \x2013 Log",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
         x, y, dlgW, dlgH,
         g_nppData._nppHandle, nullptr, g_hDllInstance, nullptr);
@@ -2640,7 +2640,7 @@ void toggleAddReadOnly()
                "the exception that when the active tab is in focus\r\n"
                "where the flag is temporarily removed.\r\n\r\n"
                "Files remain fully editable within Notepad++."),
-            _T("FileLock"),
+            _T("Exclusive File Lock"),
             MB_OK | MB_ICONINFORMATION
         );
     }
@@ -2657,7 +2657,7 @@ void toggleAddReadOnly()
             g_nppData._nppHandle,
             _T("\"Add Read-only\" is now DISABLED.\r\n"
                "File attributes have been restored."),
-            _T("FileLock"),
+            _T("Exclusive File Lock"),
             MB_OK | MB_ICONINFORMATION
         );
     }
@@ -2696,7 +2696,7 @@ void toggleLogging()
 // Reads the plugin's FILEVERSION from the DLL's own VERSIONINFO resource and
 // returns it as a "MAJOR.MINOR.PATCH" wide string.
 // The version is defined once in resource.h (VERSION_MAJOR / MINOR / PATCH /
-// BUILD) and embedded into the DLL by FileLockPlugin.rc at build time.
+// BUILD) and embedded into the DLL by ExclusiveFileLock.rc at build time.
 // ─────────────────────────────────────────────────────────────────────────────
 static std::wstring getPluginVersion()
 {
@@ -2771,7 +2771,7 @@ static INT_PTR CALLBACK aboutDlgProc(HWND hDlg, UINT msg,
 
 // ── showAbout ─────────────────────────────────────────────────────────────────
 //
-// Opens the About dialog (IDD_ABOUT from FileLockPlugin.rc).
+// Opens the About dialog (IDD_ABOUT from ExclusiveFileLock.rc).
 // Shows plugin version (read from DLL VERSIONINFO at runtime), developer,
 // and three clickable SysLink controls for website, GitHub, and licence.
 // ─────────────────────────────────────────────────────────────────────────────

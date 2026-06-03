@@ -1,9 +1,9 @@
 // resource.h
-// Pre-compile configuration for ExclusiveFileLock Notepad++ Plugin.
+// Pre-compile configuration for Exclusive File Lock Notepad++ Plugin.
 //
 // ── VERSION ──────────────────────────────────────────────────────────────────
 // Edit the four VERSION_* numbers here to update the plugin version everywhere:
-//   • FILEVERSION / PRODUCTVERSION in FileLockPlugin.rc  (Windows file
+//   • FILEVERSION / PRODUCTVERSION in ExclusiveFileLock.rc  (Windows file
 //     Properties > Details tab)
 //   • The About dialog  (reads from the DLL at runtime via GetFileVersionInfoW)
 //

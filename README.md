@@ -1,4 +1,4 @@
-# FileLock – Notepad++ Plugin
+# Exclusive File Lock – Notepad++ Plugin
 
 A Windows-exclusive Notepad++ plugin that places an **exclusive file lock** on
 any file open in the editor, preventing other processes from writing to or
@@ -256,7 +256,7 @@ This plugin follows the layout of the official Notepad++ plugin template
 (<https://github.com/npp-plugins/plugintemplate>):
 
 ```text
-FileLockPlugin/
+ExclusiveFileLock/
 ├── src/
 │   ├── Sci_Position.h          ← Scintilla position type (Sci_Position, Sci_Line)
 │   ├── Scintilla.h             ← Scintilla types: uptr_t, sptr_t, SCNotification
@@ -264,9 +264,9 @@ FileLockPlugin/
 │   ├── PluginInterface.h       ← Core plugin types: NppData, FuncItem, ShortcutKey, exports
 │   ├── PluginDefinition.h      ← Plugin name, command count, forward declarations (STEPS 1–3)
 │   ├── PluginDefinition.cpp    ← All plugin logic and Npp interface exports  (STEP 4)
-│   └── FileLockPlugin.def      ← Module definition — ensures clean DLL export names
+│   └── ExclusiveFileLock.def   ← Module definition — ensures clean DLL export names
 ├── vs.proj/
-│   └── FileLockPlugin.vcxproj  ← Visual Studio / MSBuild project file
+│   └── ExclusiveFileLock.vcxproj  ← Visual Studio / MSBuild project file
 └── README.md                   ← This file
 ```
 
@@ -326,7 +326,7 @@ version number), not `\2026\`.
 
 ### Step 2 – Create the .vscode folder
 
-Inside the `FileLockPlugin\` project root, create a folder named `.vscode`.
+Inside the `ExclusiveFileLock\` project root, create a folder named `.vscode`.
 
 ### Step 3 – Create tasks.json
 
@@ -339,9 +339,9 @@ a different location (use the path found in Step 1).
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build FileLockPlugin (x64 Release)",
+      "label": "Build ExclusiveFileLock (x64 Release)",
       "type": "shell",
-      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\" && msbuild vs.proj\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m",
+      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\" && msbuild vs.proj\\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=x64 /m",
       "options": {
         "shell": {
           "executable": "cmd.exe",
@@ -356,9 +356,9 @@ a different location (use the path found in Step 1).
       "detail": "Builds a 64-bit DLL for use with 64-bit Notepad++"
     },
     {
-      "label": "Build FileLockPlugin (Win32 Release)",
+      "label": "Build ExclusiveFileLock (Win32 Release)",
       "type": "shell",
-      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars32.bat\" && msbuild vs.proj\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=Win32 /m",
+      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars32.bat\" && msbuild vs.proj\\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=Win32 /m",
       "options": {
         "shell": {
           "executable": "cmd.exe",
@@ -401,7 +401,7 @@ Build succeeded.
     0 Error(s)
 ```
 
-The compiled DLL is written to `vs.proj\x64\Release\FileLockPlugin.dll`.
+The compiled DLL is written to `vs.proj\x64\Release\ExclusiveFileLock.dll`.
 
 ### Changing the default build to Win32 (32-bit)
 
@@ -438,7 +438,7 @@ To make `Ctrl+Shift+B` build the 32-bit DLL instead, swap which task carries
    }
    ```
 
-`Ctrl+Shift+B` now builds `vs.proj\Win32\Release\FileLockPlugin.dll`.
+`Ctrl+Shift+B` now builds `vs.proj\Win32\Release\ExclusiveFileLock.dll`.
 
 ### Building both platforms with one shortcut
 
@@ -451,9 +451,9 @@ and make that the default.  In `tasks.json`, add a third task and update the
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build FileLockPlugin (x64 Release)",
+      "label": "Build ExclusiveFileLock (x64 Release)",
       "type": "shell",
-      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\" && msbuild vs.proj\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m",
+      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\" && msbuild vs.proj\\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=x64 /m",
       "options": {
         "shell": {
           "executable": "cmd.exe",
@@ -465,9 +465,9 @@ and make that the default.  In `tasks.json`, add a third task and update the
       "detail": "Builds a 64-bit DLL for use with 64-bit Notepad++"
     },
     {
-      "label": "Build FileLockPlugin (Win32 Release)",
+      "label": "Build ExclusiveFileLock (Win32 Release)",
       "type": "shell",
-      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars32.bat\" && msbuild vs.proj\\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=Win32 /m",
+      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars32.bat\" && msbuild vs.proj\\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=Win32 /m",
       "options": {
         "shell": {
           "executable": "cmd.exe",
@@ -479,10 +479,10 @@ and make that the default.  In `tasks.json`, add a third task and update the
       "detail": "Builds a 32-bit DLL for use with 32-bit Notepad++"
     },
     {
-      "label": "Build FileLockPlugin (All Platforms)",
+      "label": "Build ExclusiveFileLock (All Platforms)",
       "dependsOn": [
-        "Build FileLockPlugin (x64 Release)",
-        "Build FileLockPlugin (Win32 Release)"
+        "Build ExclusiveFileLock (x64 Release)",
+        "Build ExclusiveFileLock (Win32 Release)"
       ],
       "group": {
         "kind": "build",
@@ -537,7 +537,7 @@ includes correctly and shows accurate error highlighting:
 ### Recommended folder layout after VS Code setup
 
 ```text
-FileLockPlugin/
+ExclusiveFileLock/
 ├── .vscode/
 │   ├── tasks.json                   ← build tasks (required)
 │   └── c_cpp_properties.json        ← IntelliSense config (optional)
@@ -548,9 +548,9 @@ FileLockPlugin/
 │   ├── PluginInterface.h
 │   ├── PluginDefinition.h
 │   ├── PluginDefinition.cpp
-│   └── FileLockPlugin.def
+│   └── ExclusiveFileLock.def
 ├── vs.proj/
-│   └── FileLockPlugin.vcxproj
+│   └── ExclusiveFileLock.vcxproj
 └── README.md
 ```
 
@@ -558,16 +558,16 @@ FileLockPlugin/
 
 ## Building with Visual Studio IDE (alternative)
 
-1. Open `vs.proj\FileLockPlugin.vcxproj` in Visual Studio 2026.
+1. Open `vs.proj\ExclusiveFileLock.vcxproj` in Visual Studio 2026.
 2. Select **Release | x64** (or **Win32** for 32-bit Notepad++).
 3. Press **Ctrl+Shift+B**.
-4. Output DLL: `vs.proj\x64\Release\FileLockPlugin.dll`.
+4. Output DLL: `vs.proj\x64\Release\ExclusiveFileLock.dll`.
 
 ### Command-line (Developer Command Prompt)
 
 ```bat
-cd FileLockPlugin
-msbuild vs.proj\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64
+cd ExclusiveFileLock
+msbuild vs.proj\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=x64
 ```
 
 ---
@@ -578,19 +578,19 @@ msbuild vs.proj\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64
    - 64-bit: `C:\Program Files\Notepad++\plugins\`
    - 32-bit: `C:\Program Files (x86)\Notepad++\plugins\`
 
-2. Create a sub-folder named **`FileLockPlugin`**:
-   `...\plugins\FileLockPlugin\`
+2. Create a sub-folder named **`ExclusiveFileLock`**:
+   `...\plugins\ExclusiveFileLock\`
 
-3. Copy **`FileLockPlugin.dll`** into that sub-folder.
+3. Copy **`ExclusiveFileLock.dll`** into that sub-folder.
 
 4. **Unblock the DLL** (important for downloaded files):
-   Right-click `FileLockPlugin.dll` → Properties → tick **Unblock** → OK.
+   Right-click `ExclusiveFileLock.dll` → Properties → tick **Unblock** → OK.
    Windows will refuse to load a DLL downloaded from the internet until it
    is explicitly unblocked.
 
 5. Restart Notepad++.
 
-6. The plugin appears under **Plugins > FileLock**.
+6. The plugin appears under **Plugins > Exclusive File Lock**.
 
 > **Architecture must match:** A 64-bit Notepad++ installation requires a
 > **64-bit DLL** (built with Platform=x64).  A 32-bit installation requires a

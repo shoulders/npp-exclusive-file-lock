@@ -2,6 +2,7 @@
 /localonly/
 /nbproject/
 /vendor/
-/vs.proj/FileLockPlugin/
+/vs.proj/ExclusiveFileLock/
+/vs.proj/Exclusive.A1B2C3D4/
 /vs.proj/x64/
 /.php_cs.cache

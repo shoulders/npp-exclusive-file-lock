@@ -8,17 +8,17 @@ Build tasks must run under `cmd.exe` (not PowerShell) because `vcvars*.bat && ms
 
 **x64 (matches 64-bit Notepad++ installations):**
 ```bat
-"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && msbuild vs.proj\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars64.bat" && msbuild vs.proj\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=x64 /m
 ```
 
 **Win32 (matches 32-bit Notepad++ installations):**
 ```bat
-"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars32.bat" && msbuild vs.proj\FileLockPlugin.vcxproj /p:Configuration=Release /p:Platform=Win32 /m
+"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvars32.bat" && msbuild vs.proj\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=Win32 /m
 ```
 
-Output: `vs.proj\x64\Release\FileLockPlugin.dll` or `vs.proj\Win32\Release\FileLockPlugin.dll`
+Output: `vs.proj\x64\Release\ExclusiveFileLock.dll` or `vs.proj\Win32\Release\ExclusiveFileLock.dll`
 
-There are no automated tests. Validation is done by copying the DLL to `C:\Program Files\Notepad++\plugins\FileLockPlugin\FileLockPlugin.dll` and testing manually in Notepad++.
+There are no automated tests. Validation is done by copying the DLL to `C:\Program Files\Notepad++\plugins\ExclusiveFileLock\ExclusiveFileLock.dll` and testing manually in Notepad++.
 
 ## Architecture
 

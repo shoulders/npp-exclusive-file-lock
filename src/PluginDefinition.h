@@ -35,7 +35,7 @@
 // and is returned by the exported getName() function.
 // Use the _T() macro so it compiles correctly in both Unicode and ANSI builds.
 //
-const TCHAR PLUGIN_NAME[] = _T("ExclusiveFileLock");
+const TCHAR PLUGIN_NAME[] = _T("Exclusive File Lock");
 
 //-----------------------------------------------//
 //-- STEP 2. DEFINE YOUR PLUGIN COMMAND NUMBER --//

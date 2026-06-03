@@ -1,6 +1,6 @@
-; FileLockPlugin.def
+; ExclusiveFileLock.def
 ;
-; Module Definition File for FileLockPlugin.dll
+; Module Definition File for ExclusiveFileLock.dll
 ;
 ; PURPOSE
 ; ───────
@@ -21,14 +21,14 @@
 ; USAGE
 ; ─────
 ; In Visual Studio: Project Properties > Linker > Input > Module Definition File
-; On the command line: link ... /DEF:FileLockPlugin.def
+; On the command line: link ... /DEF:ExclusiveFileLock.def
 ;
 ; EXPORTED FUNCTIONS
 ; ──────────────────
 ; The six names below are the EXACT strings Notepad++ passes to GetProcAddress.
 ; They must never be renamed, reordered, or removed.
 
-LIBRARY "FileLockPlugin"
+LIBRARY "ExclusiveFileLock"
 
 EXPORTS
     ; ── Mandatory Notepad++ plugin interface ──────────────────────────────
