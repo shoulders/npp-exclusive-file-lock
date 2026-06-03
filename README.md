@@ -54,11 +54,11 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 | --- | --- |
 | **Enable File Locking** | Master switch. Shows a ✔ check-mark when enabled. Turning OFF releases all currently held locks immediately. State is saved to the registry automatically and restored on the next Notepad++ start. |
 | *(separator)* | — |
+| **Add Read-only** | When enabled (✔), also sets `FILE_ATTRIBUTE_READONLY` on each locked file. State is saved to the registry automatically. See [*Add Read-only option*](#add-read-only-option) below. |
+| *(separator)* | — |
 | **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
 | **Unlock Current File** | Releases the lock on the active tab's file without closing the tab. |
 | **Show Status** | Concise summary of the current state. Shows option settings (locking, Add Read-only, Logging) and three file lists: **Locked files**, **Read-only files**, and **Pseudo Read-only files** (see [*File categories in Show Status*](#file-categories-in-show-status)). |
-| *(separator)* | — |
-| **Add Read-only** | When enabled (✔), also sets `FILE_ATTRIBUTE_READONLY` on each locked file. State is saved to the registry automatically. See [*Add Read-only option*](#add-read-only-option) below. |
 | *(separator)* | — |
 | **Enable Logging** | When enabled (✔), captures timestamped diagnostic events to an in-memory log. Enabling clears any previous log and starts fresh. State is saved to the registry and survives Notepad++ restarts. See [*Diagnostics and logging*](#diagnostics-and-logging) below. |
 | **Show Log** | Displays the captured event log together with a live diagnostic snapshot: Scintilla read-only state, subclass intercept counters, attribute tracking tables, and a Scintilla writability test. |
