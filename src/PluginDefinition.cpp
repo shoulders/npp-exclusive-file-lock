@@ -59,12 +59,12 @@
 // Index  Label                       Behaviour
 //  [0]   Enable File Locking          Flips g_lockingEnabled; updates check-mark; persisted to registry
 //  [1]   (separator)                  Empty name → Notepad++ renders a line
-//  [2]   Lock Current File            Manually locks the active tab
-//  [3]   Unlock Current File          Manually releases the active tab's lock
-//  [4]   (separator)                  Empty name → Notepad++ renders a line
-//  [5]   Show Status                  Message box listing all locked files
+//  [2]   Add Read-only                Toggles FILE_ATTRIBUTE_READONLY on locked files; persisted to registry
+//  [3]   (separator)                  Empty name → Notepad++ renders a line
+//  [4]   Lock Current File            Manually locks the active tab
+//  [5]   Unlock Current File          Manually releases the active tab's lock
 //  [6]   (separator)                  Empty name → Notepad++ renders a line
-//  [7]   Add Read-only                Toggles FILE_ATTRIBUTE_READONLY on locked files; persisted to registry
+//  [7]   Show Status                  Message box listing all locked files
 //  [8]   (separator)                  Empty name → Notepad++ renders a line
 //  [9]   Enable Logging               Toggles diagnostic event logging
 // [10]   Show Log                     Displays captured events and live state
@@ -1983,23 +1983,23 @@ void commandMenuInit()
     funcItem[1]._init2Check = false;
     funcItem[1]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[2]._itemName, _T("Lock Current File"));
-    funcItem[2]._pFunc      = lockCurrentFile;
-    funcItem[2]._init2Check = false;
+    ::lstrcpy(funcItem[2]._itemName, _T("Add Read-only"));
+    funcItem[2]._pFunc      = toggleAddReadOnly;
+    funcItem[2]._init2Check = g_addReadOnly;
     funcItem[2]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[3]._itemName, _T("Unlock Current File"));
-    funcItem[3]._pFunc      = unlockCurrentFile;
+    ::lstrcpy(funcItem[3]._itemName, _T(""));
+    funcItem[3]._pFunc      = nullptr;
     funcItem[3]._init2Check = false;
     funcItem[3]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[4]._itemName, _T(""));
-    funcItem[4]._pFunc      = nullptr;
+    ::lstrcpy(funcItem[4]._itemName, _T("Lock Current File"));
+    funcItem[4]._pFunc      = lockCurrentFile;
     funcItem[4]._init2Check = false;
     funcItem[4]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[5]._itemName, _T("Show Status"));
-    funcItem[5]._pFunc      = showLockStatus;
+    ::lstrcpy(funcItem[5]._itemName, _T("Unlock Current File"));
+    funcItem[5]._pFunc      = unlockCurrentFile;
     funcItem[5]._init2Check = false;
     funcItem[5]._pShKey     = nullptr;
 
@@ -2008,9 +2008,9 @@ void commandMenuInit()
     funcItem[6]._init2Check = false;
     funcItem[6]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[7]._itemName, _T("Add Read-only"));
-    funcItem[7]._pFunc      = toggleAddReadOnly;
-    funcItem[7]._init2Check = g_addReadOnly;
+    ::lstrcpy(funcItem[7]._itemName, _T("Show Status"));
+    funcItem[7]._pFunc      = showLockStatus;
+    funcItem[7]._init2Check = false;
     funcItem[7]._pShKey     = nullptr;
 
     ::lstrcpy(funcItem[8]._itemName, _T(""));
@@ -2622,7 +2622,7 @@ void toggleAddReadOnly()
     {
         UINT checkFlag = g_addReadOnly ? MF_CHECKED : MF_UNCHECKED;
         ::CheckMenuItem(hMenu,
-                        static_cast<UINT>(funcItem[7]._cmdID),
+                        static_cast<UINT>(funcItem[2]._cmdID),
                         MF_BYCOMMAND | checkFlag);
     }
 
@@ -2636,8 +2636,9 @@ void toggleAddReadOnly()
         ::MessageBox(
             g_nppData._nppHandle,
             _T("\"Add Read-only\" is now ENABLED.\r\n"
-               "FILE_ATTRIBUTE_READONLY is set on locked files while\r\n"
-               "Notepad++ is not the active window.\r\n\r\n"
+               "The Read-only file attribute is set on locked files with\r\n"
+               "the exception that when the active tab is in focus\r\n"
+               "where the flag is temporarily removed.\r\n\r\n"
                "Files remain fully editable within Notepad++."),
             _T("FileLock"),
             MB_OK | MB_ICONINFORMATION
