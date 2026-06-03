@@ -2114,6 +2114,7 @@ void toggleLocking()
         if (!g_lockMap.count(path))
             toOffer.push_back(path);
 
+    // Message when there are no open files
     if (toOffer.empty())
     {
         ::MessageBox(
@@ -2125,20 +2126,15 @@ void toggleLocking()
         return;
     }
 
-    wchar_t prompt[320];
-    ::_snwprintf_s(prompt, _countof(prompt), _TRUNCATE,
-        L"File locking is now ENABLED.\r\n\r\n"
-        L"%d file(s) are already open and not yet locked.\r\n"
-        L"Lock them now?",
-        static_cast<int>(toOffer.size()));
+    // Message when there are open files
+    ::MessageBoxW(
+        g_nppData._nppHandle,
+        L"File locking is now ENABLED.\r\nOpened files and files you open will be locked exclusively.",
+        L"FileLock",
+        MB_OK | MB_ICONINFORMATION);
 
-    int res = ::MessageBoxW(
-        g_nppData._nppHandle, prompt, L"FileLock",
-        MB_YESNO | MB_ICONQUESTION);
-
-    if (res == IDYES)
-        for (const auto& p : toOffer)
-            lockPath(p);
+    for (const auto& p : toOffer)
+        lockPath(p);
 }
 
 // ── lockCurrentFile ──────────────────────────────────────────────────────────
