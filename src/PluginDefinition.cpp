@@ -66,8 +66,8 @@
 //  [6]   (separator)                  Empty name → Notepad++ renders a line
 //  [7]   Show Status                  Message box listing all locked files
 //  [8]   (separator)                  Empty name → Notepad++ renders a line
-//  [9]   Enable Logging               Toggles diagnostic event logging
-// [10]   Show Log                     Displays captured events and live state
+//  [9]   Show Diagnostics             Displays captured events and live state
+// [10]   Enable Logging               Toggles diagnostic event logging
 //
 // NOTEPAD++ MESSAGE USAGE
 // ───────────────────────
@@ -280,7 +280,7 @@ static const UINT WM_FL_CLEAR_RO = WM_APP + 3;
 //   so it survives restarts unconditionally.
 static bool g_loggingEnabled = false;
 
-// g_log — in-memory event log shown by Show Log.
+// g_log — in-memory event log shown by Show Diagnostics.
 // Accumulates timestamped entries from key points in the hook chain.
 // Capped at 200 entries.  Cleared when logging is toggled on.
 static std::vector<std::wstring> g_log;
@@ -1357,7 +1357,7 @@ static LRESULT CALLBACK cmdHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 // file was originally writable).  Files that were read-only before being opened
 // are not in g_pendingRestorePaths and are therefore unaffected.
 // ─────────────────────────────────────────────────────────────────────────────
-// Diagnostic counters for sciSubclassProc — shown in Show Log.
+// Diagnostic counters for sciSubclassProc — shown in Show Diagnostics.
 static int g_subclassCallCount      = 0;  // total SCI_SETREADONLY calls seen
 static int g_subclassInterceptCount = 0;  // times we changed 1 → 0
 
@@ -2018,14 +2018,14 @@ void commandMenuInit()
     funcItem[8]._init2Check = false;
     funcItem[8]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[9]._itemName, _T("Enable Logging"));
-    funcItem[9]._pFunc      = toggleLogging;
-    funcItem[9]._init2Check = g_loggingEnabled;
+    ::lstrcpy(funcItem[9]._itemName, _T("Show Diagnostics"));
+    funcItem[9]._pFunc      = showDiagnostics;
+    funcItem[9]._init2Check = false;
     funcItem[9]._pShKey     = nullptr;
 
-    ::lstrcpy(funcItem[10]._itemName, _T("Show Log"));
-    funcItem[10]._pFunc      = showLog;
-    funcItem[10]._init2Check = false;
+    ::lstrcpy(funcItem[10]._itemName, _T("Enable Logging"));
+    funcItem[10]._pFunc      = toggleLogging;
+    funcItem[10]._init2Check = g_loggingEnabled;
     funcItem[10]._pShKey     = nullptr;
 
     ::lstrcpy(funcItem[11]._itemName, _T(""));
@@ -2250,7 +2250,7 @@ void unlockCurrentFile()
 //
 // Shows a concise summary of the current lock state: which files are locked,
 // whether automatic locking is on, and current option settings.
-// Diagnostic detail is available via Show Log.
+// Diagnostic detail is available via Show Diagnostics.
 // ─────────────────────────────────────────────────────────────────────────────
 void showLockStatus()
 {
@@ -2305,7 +2305,7 @@ void showLockStatus()
 
 // ── Log dialog window procedure ───────────────────────────────────────────────
 //
-// Backs the scrollable log window shown by showLog().  The window contains a
+// Backs the scrollable log window shown by showDiagnostics().  The window contains a
 // full-client multiline read-only EDIT control (with both scrollbars) and a
 // centred OK button at the bottom.  The window is resizable so the user can
 // expand it if needed.
@@ -2360,7 +2360,7 @@ static LRESULT CALLBACK logWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         int by = rc.bottom - BTN_H - MARGIN;
 
         ::CreateWindowExW(
-            0, L"BUTTON", L"Copy Log",
+            0, L"BUTTON", L"Copy",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
             bx, by, BTN_W_COPY, BTN_H,
             hwnd, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(IDC_LOG_COPY)), hi, nullptr);
@@ -2451,14 +2451,14 @@ static LRESULT CALLBACK logWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
     return ::DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-// ── showLog ──────────────────────────────────────────────────────────────────
+// ── showDiagnostics ───────────────────────────────────────────────────────────
 //
 // Displays the in-memory event log and a snapshot of live diagnostic state
 // in a scrollable, resizable window.  The window is sized to 80% of the
 // screen working area height so it never goes off-screen.
 // Enable logging first via "Enable Logging" in the plugin menu.
 // ─────────────────────────────────────────────────────────────────────────────
-void showLog()
+void showDiagnostics()
 {
     std::wstringstream ss;
 
@@ -2558,7 +2558,7 @@ void showLog()
     HWND hDlg = ::CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         L"ExclusiveFileLockLogWnd",
-        L"Exclusive File Lock \x2013 Log",
+        L"Exclusive File Lock \x2013 Diagnostics",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME,
         x, y, dlgW, dlgH,
         g_nppData._nppHandle, nullptr, g_hDllInstance, nullptr);

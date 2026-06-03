@@ -54,8 +54,8 @@ const TCHAR PLUGIN_NAME[] = _T("Exclusive File Lock");
 //   [6] ---                            ← separator
 //   [7] Add Read-only                  ← set FILE_ATTRIBUTE_READONLY on locked files (persisted)
 //   [8] ---                            ← separator
-//   [9] Enable Logging                 ← capture diagnostic events to in-memory log
-//  [10] Show Log                       ← display captured events and live state
+//   [9] Show Diagnostics               ← display captured events and live state
+//  [10] Enable Logging                 ← capture diagnostic events to in-memory log
 //  [11] ---                            ← separator
 //  [12] About                          ← version, developer, links
 //
@@ -88,7 +88,7 @@ void toggleAddReadOnly();
 void toggleLogging();
 
 // Displays the diagnostic event log and live Scintilla state.
-void showLog();
+void showDiagnostics();
 
 // Displays the About dialog (version, developer, website, GitHub, licence).
 void showAbout();
