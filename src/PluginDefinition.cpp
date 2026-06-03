@@ -2291,13 +2291,24 @@ void showLockStatus()
         for (const auto& p : g_pendingRestorePaths)
             ss << L"  \x2022 " << p << L"\r\n";
 
-    if (!g_foreignOpenPaths.empty())
-    {
-        ss << L"\r\nFiles skipped — open in another process ("
-           << g_foreignOpenPaths.size() << L"):\r\n";
+    // Files blocked by concurrent access — always shown so count is visible
+    ss << L"\r\nFiles skipped \x2014 open in another process ("
+       << g_foreignOpenPaths.size() << L"):\r\n";
+    if (g_foreignOpenPaths.empty())
+        ss << L"  (none)\r\n";
+    else
         for (const auto& p : g_foreignOpenPaths)
+        {
             ss << L"  \x2022 " << p << L"\r\n";
-    }
+            std::vector<std::wstring> owners = getFileOwnerProcessNames(p);
+            if (!owners.empty())
+            {
+                ss << L"    Held by:";
+                for (const auto& o : owners)
+                    ss << L" " << o;
+                ss << L"\r\n";
+            }
+        }
 
     ::MessageBoxW(g_nppData._nppHandle,
         ss.str().c_str(), L"Exclusive File Lock \x2013 Status", MB_OK | MB_ICONINFORMATION);
@@ -2494,6 +2505,23 @@ void showDiagnostics()
     ss << L"\r\ng_pendingRestorePaths (" << g_pendingRestorePaths.size() << L"):\r\n";
     for (const auto& p : g_pendingRestorePaths)
         ss << L"  " << p << L"\r\n";
+
+    ss << L"\r\ng_foreignOpenPaths (" << g_foreignOpenPaths.size() << L"):\r\n";
+    if (g_foreignOpenPaths.empty())
+        ss << L"  (none)\r\n";
+    else
+        for (const auto& p : g_foreignOpenPaths)
+        {
+            ss << L"  " << p << L"\r\n";
+            std::vector<std::wstring> owners = getFileOwnerProcessNames(p);
+            if (!owners.empty())
+            {
+                ss << L"  Held by:";
+                for (const auto& o : owners)
+                    ss << L" " << o;
+                ss << L"\r\n";
+            }
+        }
 
     // ── Scintilla writability test ────────────────────────────────────────
     ::SendMessage(g_nppData._scintillaMainHandle, SCI_SETREADONLY, 0, 0);

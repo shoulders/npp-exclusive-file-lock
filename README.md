@@ -58,7 +58,7 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 | *(separator)* | — |
 | **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
 | **Unlock Current File** | Releases the lock on the active tab's file without closing the tab. |
-| **Show Status** | Concise summary of the current state. Shows option settings (locking, Add Read-only, Logging) and three file lists: **Locked files**, **Read-only files**, and **Pseudo Read-only files** (see [*File categories in Show Status*](#file-categories-in-show-status)). |
+| **Show Status** | Concise summary of the current state. Shows option settings (locking, Add Read-only, Logging) and four file lists: **Locked files**, **Read-only files**, **Pseudo Read-only files**, and **Files skipped — open in another process** (see [*File categories in Show Status*](#file-categories-in-show-status)). |
 | *(separator)* | — |
 | **Enable Logging** | When enabled (✔), captures timestamped diagnostic events to an in-memory log. Enabling clears any previous log and starts fresh. State is saved to the registry and survives Notepad++ restarts. See [*Diagnostics and logging*](#diagnostics-and-logging) below. |
 | **Show Log** | Displays the captured event log together with a live diagnostic snapshot: Scintilla read-only state, subclass intercept counters, attribute tracking tables, and a Scintilla writability test. |
@@ -146,15 +146,16 @@ The net result is indistinguishable from manual locking: on startup all backgrou
 
 ## File categories in Show Status
 
-**Show Status** lists files in three separate groups:
+**Show Status** lists files in four separate groups:
 
 | List | Which files appear here |
 | --- | --- |
 | **Locked files** | Every file for which the plugin holds an active Win32 lock handle (`CreateFile` with `FILE_SHARE_READ \| FILE_SHARE_WRITE`, no `FILE_SHARE_DELETE`). |
 | **Read-only files** | Files whose `FILE_ATTRIBUTE_READONLY` flag was already set on disk before the plugin opened them. The plugin tracks these but does **not** change their attribute — they remain read-only when unlocked. |
 | **Pseudo Read-only files** | Originally writable files on which the plugin has set `FILE_ATTRIBUTE_READONLY` via **Add Read-only**. The original (writable) attribute is restored automatically when the file is unlocked, locking is disabled, or Notepad++ shuts down. |
+| **Files skipped — open in another process** | Files that could not be locked because another application currently holds an open handle to them (detected via the Windows Restart Manager API). For each file the name of the holding process (e.g. `winword.exe`) is shown indented below the path. Once the other application closes the file, the next tab switch to it will lock it normally and remove it from this list. |
 
-A file can appear in **Locked files** and one of the read-only lists at the same time (when **Add Read-only** is enabled).  The two read-only lists are always shown; they will both be empty when **Add Read-only** is off.
+A file can appear in **Locked files** and one of the read-only lists at the same time (when **Add Read-only** is enabled).  The two read-only lists are always shown; they will both be empty when **Add Read-only** is off.  The **Files skipped** list is always shown; it will be empty when no concurrent-access conflicts are active.
 
 ---
 
@@ -178,7 +179,7 @@ Open **Plugins > ExclusiveFileLock > Show Log** at any time.  The dialog shows:
 | --- | --- |
 | **Event log** | Timestamped entries from key points in the hook chain: tab switches, lock acquisitions and releases, read-only changes, deferred message handling. Up to 200 entries are kept. |
 | **Live state** | Current `SCI_GETREADONLY` values for both Scintilla views, subclass intercept counters, and handle validity. |
-| **Attribute tracking tables** | Contents of `g_readOnlyOriginals` (original attributes before the plugin touched them) and `g_pendingRestorePaths` (files whose `FILE_ATTRIBUTE_READONLY` we set and must restore on unlock or crash recovery). |
+| **Attribute tracking tables** | Contents of `g_readOnlyOriginals` (original attributes before the plugin touched them), `g_pendingRestorePaths` (files whose `FILE_ATTRIBUTE_READONLY` we set and must restore on unlock or crash recovery), and `g_foreignOpenPaths` (files currently blocked by a concurrent-access conflict, with the holding process name). |
 | **Scintilla writability test** | Forces `SCI_SETREADONLY 0` then attempts a programmatic `SCI_ADDTEXT` insertion to confirm the document is genuinely editable at the `pdoc` level, not just at the view flag level. |
 
 ### Log lifetime and scope
@@ -212,6 +213,12 @@ lock.  If one is found, the plugin:
 
 The check is repeated each time you switch back to that tab.  Once the other
 application closes the file, the next tab switch locks it normally.
+
+All files currently blocked by a concurrent-access conflict are listed under
+**Files skipped — open in another process** in **Show Status**, with the name
+of the holding process (e.g. `winword.exe`) shown indented below each path.
+The same list with process names is also visible in **Show Diagnostics** under
+the `g_foreignOpenPaths` attribute tracking table.
 
 ### How detection works
 
