@@ -37,6 +37,17 @@
   TargetName = ExclusiveFileLock
       output file will be ExclusiveFileLock.dll
 
+  IntDir and OutDir (explicit — required by name length)
+      MSBuild's Microsoft.Cpp.MSVC.Toolset.Common.props applies a 16-character
+      threshold when computing the default IntDir.  Project names longer than
+      16 characters are silently replaced with a truncated form:
+          $(ProjectName.Substring(0,8)).$(ProjectGuid.Substring(1,8))
+      "ExclusiveFileLock" is 17 characters, so without explicit values MSBuild
+      would produce "Exclusiv.A1B2C3D4\" instead of the full plugin name.
+      The IntDir and OutDir PropertyGroups below pin the paths to the full name.
+      The previous plugin name "FileLockPlugin" (14 chars) was under the
+      threshold and did not need this workaround.
+
 -->
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 
@@ -78,6 +89,20 @@
   </PropertyGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <!-- ── Output directories ── -->
+  <!-- Explicit IntDir and OutDir are required because "ExclusiveFileLock"       -->
+  <!-- (17 chars) exceeds the 16-char threshold in                               -->
+  <!-- Microsoft.Cpp.MSVC.Toolset.Common.props, which would otherwise silently   -->
+  <!-- truncate IntDir to "Exclusiv.A1B2C3D4\..." — see top-of-file comment.    -->
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <IntDir>ExclusiveFileLock\Win32\Release\</IntDir>
+    <OutDir>Win32\Release\</OutDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IntDir>ExclusiveFileLock\x64\Release\</IntDir>
+    <OutDir>x64\Release\</OutDir>
+  </PropertyGroup>
 
   <!-- ── Compiler settings (both platforms) ── -->
   <ItemDefinitionGroup>

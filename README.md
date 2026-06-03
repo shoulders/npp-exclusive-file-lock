@@ -270,6 +270,17 @@ ExclusiveFileLock/
 └── README.md                   ← This file
 ```
 
+> **Note — MSBuild IntDir name truncation:** `ExclusiveFileLock.vcxproj` contains
+> explicit `<IntDir>` and `<OutDir>` properties.  MSBuild's
+> `Microsoft.Cpp.MSVC.Toolset.Common.props` applies a **16-character threshold**
+> to the project name when computing the default `IntDir`: names longer than 16
+> characters are silently replaced with
+> `$(ProjectName.Substring(0,8)).$(ProjectGuid.Substring(1,8))`.  At 17
+> characters, "ExclusiveFileLock" crosses that threshold and would otherwise
+> produce `Exclusiv.A1B2C3D4\` as the intermediate directory.  The previous
+> name "FileLockPlugin" (14 characters) was under the threshold and did not need
+> this.  The explicit properties pin the paths to the full plugin name.
+
 ### Header file roles
 
 | File | Purpose |
