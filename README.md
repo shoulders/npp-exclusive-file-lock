@@ -6,7 +6,7 @@
 > - I am not current building an x86 (32-bit) version as I have no way to test it and everyone should be on x64. You can build it yourself if needed.
 > - This plugon is not currently in the NPP plugin catalogue, but once tested I will add it.
 
-A Windows-exclusive Notepad++ plugin that places an **exclusive file lock** on any file open in the editor, preventing other processes from writing to or deleting the file while it is open. It also can add a `Read-only` flag to the files at the same time to prevent them being opened and edited by another application (e.g. `notepad.exe`) that does not obey exclusive file locks.
+A Windows-exclusive Notepad++ plugin that places an **exclusive file lock** on any file open in the editor, preventing other processes from writing to or deleting the file while it is open. It also can also add a `Read-only` flag to those files at the same time to prevent them being opened and edited by another application that does not obey exclusive file locks (e.g. `notepad.exe`).
 
 One further feature of this plugin is that it will detect files that have open handles to them by other applications and will prevent these files from being locked. This only works with modern applcations (e.g. `word.exe`).
 
