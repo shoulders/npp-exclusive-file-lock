@@ -1,8 +1,151 @@
 # Exclusive File Lock – Notepad++ Plugin
 
-A Windows-exclusive Notepad++ plugin that places an **exclusive file lock** on
-any file open in the editor, preventing other processes from writing to or
-deleting the file while it is open.
+> **TL;DR**
+>
+> - This is my first CPP app and I used Claude AI to help me, so if you find any issues please report them.
+> - I am not current building an x86 (32-bit) version as I have no way to test it and everyone should be on x64. You can build it yourself if needed.
+> - This plugon is not currently in the NPP plugin catalogue, but once tested I will add it.
+
+A Windows-exclusive Notepad++ plugin that places an **exclusive file lock** on any file open in the editor, preventing other processes from writing to or deleting the file while it is open. It also can add a `Read-only` flag to the files at the same time to prevent them being opened and edited by another application (e.g. `notepad.exe`) that does not obey exclusive file locks.
+
+One further feature of this plugin is that it will detect files that have open handles to them by other applications and will prevent these files from being locked. This only works with modern applcations (e.g. `word.exe`).
+
+---
+
+## Menu items
+
+| Menu item | What it does |
+| --- | --- |
+| **Enable File Locking** | Master switch. Shows a ✔ check-mark when enabled. Turning OFF releases all currently held locks immediately. State is saved to the registry automatically and restored on the next Notepad++ start.<br>See [*Automatic Behaviour*](#automatic-behaviour) and [*How the lock works*](#how-the-lock-works) below for more information. |
+| — | |
+| **Add Read-only** | When enabled (✔), locking also sets `FILE_ATTRIBUTE_READONLY` on each locked file. State is saved to the registry automatically.<br>See [*Add Read-only option*](#add-read-only-option) below for more information. |
+| — | |
+| **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
+| **Unlock Current File** | Releases the lock on the active tab's file without closing the tab. |
+| — | |
+| **Show Status** | Concise summary of the current state. Shows option settings (locking, Add Read-only, Logging) and four file lists: **Locked files**, **Read-only files**, **Pseudo Read-only files**, and **Files skipped — open in another process** <br>See [*File categories in Show Status*](#file-categories-in-show-status) for more information. |
+| — | |
+| **Show Diagnostics** | Displays the captured event log together with a live diagnostic snapshot: Scintilla read-only state, subclass intercept counters, attribute tracking tables, and a Scintilla writability test. |
+| **Enable Logging** | When enabled (✔), captures timestamped diagnostic events to an in-memory log. Enabling clears any previous log and starts fresh. State is saved to the registry and survives Notepad++ restarts.<br>See [*Logging*](#logging) below for more information. |
+| — | |
+| **About** | Displays the plugin version, developer information, website link, and licence. |
+
+---
+
+## Installation
+
+1. Download the [latest release here](http://github/shoulders/npp-exclusive-file-lock/releases).
+
+2. Locate your Notepad++ plugins folder:
+   - 64-bit: `C:\Program Files\Notepad++\plugins\`
+   - 32-bit: `C:\Program Files (x86)\Notepad++\plugins\`
+
+3. Create a sub-folder named **`ExclusiveFileLock`**:
+   `...\plugins\ExclusiveFileLock\`
+
+4. Copy **`ExclusiveFileLock.dll`** into that sub-folder.
+
+5. **Unblock the DLL** (important for downloaded files):
+   Right-click `ExclusiveFileLock.dll` → Properties → tick **Unblock** → OK.
+   Windows will refuse to load a DLL downloaded from the internet until it
+   is explicitly unblocked.
+
+6. Restart Notepad++.
+
+7. The plugin appears under **Plugins > Exclusive File Lock**.
+
+> **Architecture must match:** A 64-bit Notepad++ installation requires a
+> **64-bit DLL** (built with Platform=x64).  A 32-bit installation requires a
+> **32-bit DLL** (Platform=Win32).  A mismatched DLL is silently ignored.
+>
+> **There is no single DLL that works for both architectures.**  A Windows DLL
+> is compiled to a specific CPU instruction set; the PE header contains a
+> `Machine` field that the Windows loader checks before mapping the image into
+> a process.  A 64-bit process can only load 64-bit DLLs, and a 32-bit process
+> can only load 32-bit DLLs.  Windows has no equivalent of macOS universal
+> ("fat") binaries.  The only partial exception is managed .NET assemblies
+> targeting `AnyCPU`, where the JIT compiles at runtime — this plugin is native
+> C++, so that does not apply.  Two separate builds are always required.
+
+---
+
+## Frequently asked questions
+
+**Can Notepad++ still save the file while it is locked?**
+Yes. The lock handle uses `FILE_SHARE_READ`, which allows Notepad++ to open
+the file for reading. Notepad++ uses its own internal handle when saving, and
+our lock does not conflict with that handle.
+
+**What happens if another program already holds a write lock?**
+`CreateFile()` will return `INVALID_HANDLE_VALUE` and the lock attempt fails.
+The **Lock Current File** command will show an error message. The file cannot
+be locked by this plugin until the competing handle is released.
+
+**Can I rename the file while it is open and locked?**
+Yes — use Notepad++'s own rename function (right-click the tab → Rename, or
+File > Rename, depending on your build).  The rename happens transparently:
+
+1. `WM_COMMAND 41017` (`IDM_FILE_RENAME`) is dequeued → plugin releases all
+   locks so nothing blocks `MoveFileExW`.
+2. The rename dialog is shown; `WM_ACTIVATE` fires when it closes (this is
+   *before* `MoveFileExW`, so the plugin deliberately ignores it).
+3. `WM_COMMAND 22003` is dequeued → plugin re-releases any accidentally
+   re-acquired locks and arms the outcome detector.
+4. **Success:** `MoveFileExW` runs, Notepad++ updates the title bar
+   (`WM_SETTEXT`) → plugin detects the old file is gone, re-locks under the
+   new name, and updates path tracking.
+5. **Cancel:** `WM_SETTEXT` fires with the file still on disk → plugin
+   restores the original lock.
+
+External renames (Windows Explorer, command line) are still blocked.
+
+External renames (Windows Explorer, command line, etc.) are still blocked
+because the lock handle omits `FILE_SHARE_DELETE` and there is no message to
+intercept for those operations.
+
+**Does the lock survive a Save-As to a new path?**
+Yes. The plugin listens for `NPPN_FILESAVED`, releases the old handle (on the
+old path), and re-acquires a new one on the current path automatically.
+
+**Is this safe for network/UNC paths?**
+It depends on the network file system and server configuration. Locking
+behaviour on network shares (SMB, NFS, etc.) is governed by the server and
+is not guaranteed by this plugin.
+
+**Why does the plugin grant `FILE_SHARE_WRITE` but not `FILE_SHARE_DELETE`?**
+`FILE_SHARE_WRITE` is required so our handle can coexist with Notepad++'s own
+write-capable handle — without it, `CreateFile` fails immediately against
+Notepad++'s already-open handle.  Granting it does not let external editors
+write freely, because Windows share-mode rules require both handles to agree;
+standard editors open with restrictive share modes and are still blocked.
+`FILE_SHARE_DELETE` is intentionally omitted because granting it would allow
+any process to open the file with `DELETE` access — enough to delete it or
+replace it via an atomic rename-over, defeating the lock.  Rename support is
+provided through the **Rename Current File…** plugin command instead.
+
+## Troubleshooting
+
+- When I kept swapping new builds of the plugin for testing, line-endings would appear and I did not know why.
+The answer is simple, the `Show All Characters` button is just below the `Plugins` menu and I was clicking that by mistake.
+- If after you upgrade/swap the plugin version and the `Read-only` attributes are not handled properly,
+disable `File Locking`, restart Notepad++, then re-enable file locking. and this should fix the issue.
+- If Notepad++ locks up while you are trying to open it, a simple trick is to create a new text file on your desktop
+and then open it with Notepad++. By opening this new file which is not in the previous session it allows
+Notepad++ to open. I would also recommend perfomr the step above to ensure it doe snot happen again.
+
+---
+---
+---
+
+## Automatic behaviour
+
+| Notepad++ event | Plugin response |
+| --- | --- |
+| File opened | If locking is **ON**, the new file is locked immediately. |
+| File saved (including Save-As) | Lock is re-acquired on the new path so the handle always matches the on-disk file. |
+| File renamed in Notepad++ | All locks released when the rename command is detected (`WM_COMMAND 41017`). Lock re-acquired under the new name on success, or restored on the original path if cancelled. External renames (Explorer, command line) are still blocked. |
+| File tab closed | Lock is **always** released, regardless of the on/off state. |
+| Notepad++ shutdown | All locks are released. |
 
 ---
 
@@ -45,38 +188,6 @@ Notepad++ uses its **own** separate handle for reading and saving, so the
 plugin does not interfere with normal editor operations.
 
 Calling `CloseHandle()` on the lock handle removes the lock instantly.
-
----
-
-## Menu items
-
-| Menu item | What it does |
-| --- | --- |
-| **Enable File Locking** | Master switch. Shows a ✔ check-mark when enabled. Turning OFF releases all currently held locks immediately. State is saved to the registry automatically and restored on the next Notepad++ start. |
-| *(separator)* | — |
-| **Add Read-only** | When enabled (✔), also sets `FILE_ATTRIBUTE_READONLY` on each locked file. State is saved to the registry automatically. See [*Add Read-only option*](#add-read-only-option) below. |
-| *(separator)* | — |
-| **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
-| **Unlock Current File** | Releases the lock on the active tab's file without closing the tab. |
-| *(separator)* | — |
-| **Show Status** | Concise summary of the current state. Shows option settings (locking, Add Read-only, Logging) and four file lists: **Locked files**, **Read-only files**, **Pseudo Read-only files**, and **Files skipped — open in another process** (see [*File categories in Show Status*](#file-categories-in-show-status)). |
-| *(separator)* | — |
-| **Show Diagnostics** | Displays the captured event log together with a live diagnostic snapshot: Scintilla read-only state, subclass intercept counters, attribute tracking tables, and a Scintilla writability test. |
-| **Enable Logging** | When enabled (✔), captures timestamped diagnostic events to an in-memory log. Enabling clears any previous log and starts fresh. State is saved to the registry and survives Notepad++ restarts. See [*Diagnostics and logging*](#diagnostics-and-logging) below. |
-| *(separator)* | — |
-| **About** | Displays the plugin version, developer information, website link, and licence. |
-
----
-
-## Automatic behaviour
-
-| Notepad++ event | Plugin response |
-| --- | --- |
-| File opened | If locking is **ON**, the new file is locked immediately. |
-| File saved (including Save-As) | Lock is re-acquired on the new path so the handle always matches the on-disk file. |
-| File renamed in Notepad++ | All locks released when the rename command is detected (`WM_COMMAND 41017`). Lock re-acquired under the new name on success, or restored on the original path if cancelled. External renames (Explorer, command line) are still blocked. |
-| File tab closed | Lock is **always** released, regardless of the on/off state. |
-| Notepad++ shutdown | All locks are released. |
 
 ---
 
@@ -147,6 +258,141 @@ The net result is indistinguishable from manual locking: on startup all backgrou
 
 ---
 
+## How Notepad++ read-only state works internally
+
+These questions came up during development and the answers are confirmed by
+runtime diagnostics.  They explain why certain approaches work or fail.
+
+**Q: When a tab is switched, what sets the Scintilla editor into read-only mode?
+It is not the file attribute — what is it?**
+
+Notepad++ maintains an internal cached `buffer._isReadOnly` flag in its C++
+`Buffer` object for each open file.  This cache is updated by Notepad++'s file
+monitor when it detects `FILE_ATTRIBUTE_READONLY` on disk.  When the user
+switches tabs, Notepad++ activates the new buffer and calls
+`pdoc->SetReadOnly(buffer._isReadOnly)` via a **direct C++ call** — not via the
+`SCI_SETREADONLY` message API.  Because it bypasses the message API, it cannot
+be intercepted by a `WH_CALLWNDPROC` hook or a window subclass.
+
+**Q: Does every tab switch update the Scintilla read-only flag for all files?**
+
+Yes.  Every tab switch activates the destination buffer, which reads
+`buffer._isReadOnly` from the cache and calls `pdoc->SetReadOnly()` for that
+specific buffer.  The flag is set per-switch, not retroactively for all open
+files at once.  Only the buffer being switched *to* is updated.
+
+**Q: In some earlier builds the initially selected file was editable on startup.
+What allowed that?**
+
+A timing gap in the startup sequence:
+
+1. Session files are opened **without** `FILE_ATTRIBUTE_READONLY` (it is cleared
+   by the crash-recovery logic before Notepad++ loads the session).  Notepad++
+   opens each buffer and sets `pdoc = false` at open time.
+2. `WM_FL_LOCK_ALL` fires later (after session restore) and sets
+   `FILE_ATTRIBUTE_READONLY` on disk.
+3. Notepad++'s file monitor detects the change and updates its **cache**:
+   `buffer._isReadOnly = true` for all files.
+4. **The active buffer's `pdoc` is not retroactively updated.**  `pdoc` is only
+   reset when a buffer is *activated* (i.e., when the user switches tabs), not
+   when the monitoring cache changes.
+5. Because no tab switch had occurred since step 1, the initially active tab
+   still had `pdoc = false` from file-open time and remained editable.
+
+Switching away and back to the originally active tab made it non-editable,
+because the tab switch triggered a fresh cache read (`buffer._isReadOnly = true`)
+and called `pdoc->SetReadOnly(true)`.
+
+**Q: What triggers Notepad++'s file monitor — is it an API call?**
+
+Yes.  Every call to `SetFileAttributesW` made by this plugin directly triggers
+Notepad++'s monitor.  The full chain is:
+
+```text
+Plugin calls SetFileAttributesW(path, attrs | FILE_ATTRIBUTE_READONLY)
+  → Windows kernel records the attribute change
+  → Windows delivers FILE_NOTIFY_CHANGE_ATTRIBUTES notification
+  → Notepad++'s ReadDirectoryChangesW callback receives it
+  → Monitoring thread posts a message to the main UI thread
+  → Main UI thread processes it → buffer._isReadOnly = true / false
+  → Next tab switch reads that cache → pdoc->SetReadOnly(true/false)
+```
+
+Notepad++ calls `ReadDirectoryChangesW` on the directories containing open files
+with the `FILE_NOTIFY_CHANGE_ATTRIBUTES` flag.  Any attribute change — including
+setting or clearing `FILE_ATTRIBUTE_READONLY` — produces a notification.
+
+The notification is **asynchronous** (typically 50–100 ms).  This means that
+when the plugin clears `FILE_ATTRIBUTE_READONLY` and then Notepad++ immediately
+processes `WM_ACTIVATE`, Notepad++ reads the *old cached* `buffer._isReadOnly`
+during the activation, not the current disk state.  The monitoring update arrives
+after `WM_ACTIVATE` has already been handled.
+
+This is why the focus-based protection works: if `FILE_ATTRIBUTE_READONLY` is
+never set while Notepad++ is focused, the monitor never fires the SET event,
+`buffer._isReadOnly` stays `false` from initial file-open, and every tab switch
+continues to call `pdoc->SetReadOnly(false)`.
+
+---
+
+**Q: Why does `g_idToPath` (buffer ID → path) need careful management, and
+what was the corruption bug?**
+
+`g_idToPath` maps each Notepad++ buffer ID to its file path.  It is used to
+unlock the right file when a tab closes (`NPPN_FILEBEFORECLOSE` carries a
+buffer ID but not a path), and to supply the buffer ID to
+`NPPM_SETBUFFERREADONLY` when making a file editable.
+
+The original code also tried to populate this map from the `WM_SETTEXT` hook,
+storing `g_pendingBufferId` from each `NPPN_BUFFERACTIVATED` and writing
+`g_idToPath[g_pendingBufferId] = currentPath` when `WM_SETTEXT` fired next.
+
+This produced a systematic corruption.  The sequence for a manual tab switch is:
+
+```text
+1. TCN_SELCHANGE                — user clicked tab B
+2. Notepad++ switches buffers
+3. WM_SETTEXT                  — title bar updated to tab B's filename
+4. (WH_CALLWNDPROCRET fires)
+5. NPPN_BUFFERACTIVATED        — notification carries tab B's buffer ID
+```
+
+`NPPN_BUFFERACTIVATED` fires at step 5, **after** `WM_SETTEXT` at step 4.
+When the hook ran at step 4, `g_pendingBufferId` still held tab A's buffer ID
+from the *previous* `NPPN_BUFFERACTIVATED`.  The write therefore became:
+
+```text
+g_idToPath[tab_A_id] = tab_B_path   ← WRONG: tab A's ID mapped to tab B's path
+```
+
+Two or three switches later, `NPPN_BUFFERACTIVATED` fired for some tab C with
+its real buffer ID — but found that ID already mapped to the wrong path from an
+earlier WM_SETTEXT write.  It detected a "path changed" event that never
+happened and called `unlockPath(wrong_path)`, silently releasing a live lock.
+
+The fix is to remove the `WM_SETTEXT` correlation entirely.  With the full
+official plugin headers (`NPPN_FIRST = 1000`) installed, `NPPN_BUFFERACTIVATED`
+fires correctly for every tab switch and maintains `g_idToPath` on its own.
+
+**Q: Why must tab-close detection be deferred to the normal message loop?**
+
+When the tab count drops (detected inside the `WH_CALLWNDPROCRET` hook),
+the plugin needs to enumerate the remaining open files to find which locks
+are now orphaned.  `enumerateOpenFilePaths()` does this by cycling tabs with
+`TCM_SETCURSEL + WM_NOTIFY(TCN_SELCHANGE)` and reading the title bar each time.
+
+Called from within `WH_CALLWNDPROCRET`, Notepad++'s internal re-entrancy guard
+blocks all further title-bar updates — so every tab returns the same title as
+the one that triggered the original `WM_SETTEXT`.  The function returns the
+same path repeated N times, and the plugin unlocks every file that isn't the
+current one.
+
+The fix: post a `WM_FL_CHECK_CLOSE` thread message and return immediately.
+That message is processed by the `WH_GETMESSAGE` hook in the normal Notepad++
+message loop, where no re-entrancy guard is active and tab cycling works.
+
+---
+
 ## File categories in Show Status
 
 **Show Status** lists files in four separate groups:
@@ -162,7 +408,7 @@ A file can appear in **Locked files** and one of the read-only lists at the same
 
 ---
 
-## Diagnostics and logging
+## Logging
 
 The plugin includes an optional in-memory event log for diagnosing lock and
 read-only behaviour.  Logging is off by default and has zero overhead when
@@ -593,232 +839,6 @@ msbuild vs.proj\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=x
 
 ---
 
-## Installation
-
-1. Locate your Notepad++ plugins folder:
-   - 64-bit: `C:\Program Files\Notepad++\plugins\`
-   - 32-bit: `C:\Program Files (x86)\Notepad++\plugins\`
-
-2. Create a sub-folder named **`ExclusiveFileLock`**:
-   `...\plugins\ExclusiveFileLock\`
-
-3. Copy **`ExclusiveFileLock.dll`** into that sub-folder.
-
-4. **Unblock the DLL** (important for downloaded files):
-   Right-click `ExclusiveFileLock.dll` → Properties → tick **Unblock** → OK.
-   Windows will refuse to load a DLL downloaded from the internet until it
-   is explicitly unblocked.
-
-5. Restart Notepad++.
-
-6. The plugin appears under **Plugins > Exclusive File Lock**.
-
-> **Architecture must match:** A 64-bit Notepad++ installation requires a
-> **64-bit DLL** (built with Platform=x64).  A 32-bit installation requires a
-> **32-bit DLL** (Platform=Win32).  A mismatched DLL is silently ignored.
->
-> **There is no single DLL that works for both architectures.**  A Windows DLL
-> is compiled to a specific CPU instruction set; the PE header contains a
-> `Machine` field that the Windows loader checks before mapping the image into
-> a process.  A 64-bit process can only load 64-bit DLLs, and a 32-bit process
-> can only load 32-bit DLLs.  Windows has no equivalent of macOS universal
-> ("fat") binaries.  The only partial exception is managed .NET assemblies
-> targeting `AnyCPU`, where the JIT compiles at runtime — this plugin is native
-> C++, so that does not apply.  Two separate builds are always required.
-
----
-
-## Frequently asked questions
-
-**Can Notepad++ still save the file while it is locked?**
-Yes. The lock handle uses `FILE_SHARE_READ`, which allows Notepad++ to open
-the file for reading. Notepad++ uses its own internal handle when saving, and
-our lock does not conflict with that handle.
-
-**What happens if another program already holds a write lock?**
-`CreateFile()` will return `INVALID_HANDLE_VALUE` and the lock attempt fails.
-The **Lock Current File** command will show an error message. The file cannot
-be locked by this plugin until the competing handle is released.
-
-**Can I rename the file while it is open and locked?**
-Yes — use Notepad++'s own rename function (right-click the tab → Rename, or
-File > Rename, depending on your build).  The rename happens transparently:
-
-1. `WM_COMMAND 41017` (`IDM_FILE_RENAME`) is dequeued → plugin releases all
-   locks so nothing blocks `MoveFileExW`.
-2. The rename dialog is shown; `WM_ACTIVATE` fires when it closes (this is
-   *before* `MoveFileExW`, so the plugin deliberately ignores it).
-3. `WM_COMMAND 22003` is dequeued → plugin re-releases any accidentally
-   re-acquired locks and arms the outcome detector.
-4. **Success:** `MoveFileExW` runs, Notepad++ updates the title bar
-   (`WM_SETTEXT`) → plugin detects the old file is gone, re-locks under the
-   new name, and updates path tracking.
-5. **Cancel:** `WM_SETTEXT` fires with the file still on disk → plugin
-   restores the original lock.
-
-External renames (Windows Explorer, command line) are still blocked.
-
-External renames (Windows Explorer, command line, etc.) are still blocked
-because the lock handle omits `FILE_SHARE_DELETE` and there is no message to
-intercept for those operations.
-
-**Does the lock survive a Save-As to a new path?**
-Yes. The plugin listens for `NPPN_FILESAVED`, releases the old handle (on the
-old path), and re-acquires a new one on the current path automatically.
-
-**Is this safe for network/UNC paths?**
-It depends on the network file system and server configuration. Locking
-behaviour on network shares (SMB, NFS, etc.) is governed by the server and
-is not guaranteed by this plugin.
-
-**Why does the plugin grant `FILE_SHARE_WRITE` but not `FILE_SHARE_DELETE`?**
-`FILE_SHARE_WRITE` is required so our handle can coexist with Notepad++'s own
-write-capable handle — without it, `CreateFile` fails immediately against
-Notepad++'s already-open handle.  Granting it does not let external editors
-write freely, because Windows share-mode rules require both handles to agree;
-standard editors open with restrictive share modes and are still blocked.
-`FILE_SHARE_DELETE` is intentionally omitted because granting it would allow
-any process to open the file with `DELETE` access — enough to delete it or
-replace it via an atomic rename-over, defeating the lock.  Rename support is
-provided through the **Rename Current File…** plugin command instead.
-
----
-
-## How Notepad++ read-only state works internally
-
-These questions came up during development and the answers are confirmed by
-runtime diagnostics.  They explain why certain approaches work or fail.
-
-**Q: When a tab is switched, what sets the Scintilla editor into read-only mode?
-It is not the file attribute — what is it?**
-
-Notepad++ maintains an internal cached `buffer._isReadOnly` flag in its C++
-`Buffer` object for each open file.  This cache is updated by Notepad++'s file
-monitor when it detects `FILE_ATTRIBUTE_READONLY` on disk.  When the user
-switches tabs, Notepad++ activates the new buffer and calls
-`pdoc->SetReadOnly(buffer._isReadOnly)` via a **direct C++ call** — not via the
-`SCI_SETREADONLY` message API.  Because it bypasses the message API, it cannot
-be intercepted by a `WH_CALLWNDPROC` hook or a window subclass.
-
-**Q: Does every tab switch update the Scintilla read-only flag for all files?**
-
-Yes.  Every tab switch activates the destination buffer, which reads
-`buffer._isReadOnly` from the cache and calls `pdoc->SetReadOnly()` for that
-specific buffer.  The flag is set per-switch, not retroactively for all open
-files at once.  Only the buffer being switched *to* is updated.
-
-**Q: In some earlier builds the initially selected file was editable on startup.
-What allowed that?**
-
-A timing gap in the startup sequence:
-
-1. Session files are opened **without** `FILE_ATTRIBUTE_READONLY` (it is cleared
-   by the crash-recovery logic before Notepad++ loads the session).  Notepad++
-   opens each buffer and sets `pdoc = false` at open time.
-2. `WM_FL_LOCK_ALL` fires later (after session restore) and sets
-   `FILE_ATTRIBUTE_READONLY` on disk.
-3. Notepad++'s file monitor detects the change and updates its **cache**:
-   `buffer._isReadOnly = true` for all files.
-4. **The active buffer's `pdoc` is not retroactively updated.**  `pdoc` is only
-   reset when a buffer is *activated* (i.e., when the user switches tabs), not
-   when the monitoring cache changes.
-5. Because no tab switch had occurred since step 1, the initially active tab
-   still had `pdoc = false` from file-open time and remained editable.
-
-Switching away and back to the originally active tab made it non-editable,
-because the tab switch triggered a fresh cache read (`buffer._isReadOnly = true`)
-and called `pdoc->SetReadOnly(true)`.
-
-**Q: What triggers Notepad++'s file monitor — is it an API call?**
-
-Yes.  Every call to `SetFileAttributesW` made by this plugin directly triggers
-Notepad++'s monitor.  The full chain is:
-
-```text
-Plugin calls SetFileAttributesW(path, attrs | FILE_ATTRIBUTE_READONLY)
-  → Windows kernel records the attribute change
-  → Windows delivers FILE_NOTIFY_CHANGE_ATTRIBUTES notification
-  → Notepad++'s ReadDirectoryChangesW callback receives it
-  → Monitoring thread posts a message to the main UI thread
-  → Main UI thread processes it → buffer._isReadOnly = true / false
-  → Next tab switch reads that cache → pdoc->SetReadOnly(true/false)
-```
-
-Notepad++ calls `ReadDirectoryChangesW` on the directories containing open files
-with the `FILE_NOTIFY_CHANGE_ATTRIBUTES` flag.  Any attribute change — including
-setting or clearing `FILE_ATTRIBUTE_READONLY` — produces a notification.
-
-The notification is **asynchronous** (typically 50–100 ms).  This means that
-when the plugin clears `FILE_ATTRIBUTE_READONLY` and then Notepad++ immediately
-processes `WM_ACTIVATE`, Notepad++ reads the *old cached* `buffer._isReadOnly`
-during the activation, not the current disk state.  The monitoring update arrives
-after `WM_ACTIVATE` has already been handled.
-
-This is why the focus-based protection works: if `FILE_ATTRIBUTE_READONLY` is
-never set while Notepad++ is focused, the monitor never fires the SET event,
-`buffer._isReadOnly` stays `false` from initial file-open, and every tab switch
-continues to call `pdoc->SetReadOnly(false)`.
-
----
-
-**Q: Why does `g_idToPath` (buffer ID → path) need careful management, and
-what was the corruption bug?**
-
-`g_idToPath` maps each Notepad++ buffer ID to its file path.  It is used to
-unlock the right file when a tab closes (`NPPN_FILEBEFORECLOSE` carries a
-buffer ID but not a path), and to supply the buffer ID to
-`NPPM_SETBUFFERREADONLY` when making a file editable.
-
-The original code also tried to populate this map from the `WM_SETTEXT` hook,
-storing `g_pendingBufferId` from each `NPPN_BUFFERACTIVATED` and writing
-`g_idToPath[g_pendingBufferId] = currentPath` when `WM_SETTEXT` fired next.
-
-This produced a systematic corruption.  The sequence for a manual tab switch is:
-
-```text
-1. TCN_SELCHANGE                — user clicked tab B
-2. Notepad++ switches buffers
-3. WM_SETTEXT                  — title bar updated to tab B's filename
-4. (WH_CALLWNDPROCRET fires)
-5. NPPN_BUFFERACTIVATED        — notification carries tab B's buffer ID
-```
-
-`NPPN_BUFFERACTIVATED` fires at step 5, **after** `WM_SETTEXT` at step 4.
-When the hook ran at step 4, `g_pendingBufferId` still held tab A's buffer ID
-from the *previous* `NPPN_BUFFERACTIVATED`.  The write therefore became:
-
-```text
-g_idToPath[tab_A_id] = tab_B_path   ← WRONG: tab A's ID mapped to tab B's path
-```
-
-Two or three switches later, `NPPN_BUFFERACTIVATED` fired for some tab C with
-its real buffer ID — but found that ID already mapped to the wrong path from an
-earlier WM_SETTEXT write.  It detected a "path changed" event that never
-happened and called `unlockPath(wrong_path)`, silently releasing a live lock.
-
-The fix is to remove the `WM_SETTEXT` correlation entirely.  With the full
-official plugin headers (`NPPN_FIRST = 1000`) installed, `NPPN_BUFFERACTIVATED`
-fires correctly for every tab switch and maintains `g_idToPath` on its own.
-
-**Q: Why must tab-close detection be deferred to the normal message loop?**
-
-When the tab count drops (detected inside the `WH_CALLWNDPROCRET` hook),
-the plugin needs to enumerate the remaining open files to find which locks
-are now orphaned.  `enumerateOpenFilePaths()` does this by cycling tabs with
-`TCM_SETCURSEL + WM_NOTIFY(TCN_SELCHANGE)` and reading the title bar each time.
-
-Called from within `WH_CALLWNDPROCRET`, Notepad++'s internal re-entrancy guard
-blocks all further title-bar updates — so every tab returns the same title as
-the one that triggered the original `WM_SETTEXT`.  The function returns the
-same path repeated N times, and the plugin unlocks every file that isn't the
-current one.
-
-The fix: post a `WM_FL_CHECK_CLOSE` thread message and return immediately.
-That message is processed by the `WH_GETMESSAGE` hook in the normal Notepad++
-message loop, where no re-entrancy guard is active and tab cycling works.
-
----
-
 ## Implementation notes
 
 The standard Notepad++ plugin API is largely non-functional in this build.
@@ -838,7 +858,51 @@ of the standard API and uses lower-level Windows mechanisms:
 | **Lock release on tab close** | `NPPN_FILEBEFORECLOSE` (code 1003) now fires with correct headers; hook also detects tab-count decreases and posts `WM_FL_CHECK_CLOSE` for deferred cleanup in the normal message loop |
 
 ---
+---
+---
+
+## Useful Notepad++ Websites
+
+I am adding these here for my future reference in developing this plugin.
+
+- **General**
+  - [Homepage](https://notepad-plus-plus.org/)
+  - [Forum](https://community.notepad-plus-plus.org/)
+  - [User Manual](https://www.npp-user-manual.org/)
+- **Plugin Development**
+  - [NPP Plugin List](https://github.com/notepad-plus-plus/nppPluginList) - Has links to all of the plugins.
+  - [Plugin Template](https://github.com/npp-plugins/plugintemplate) - Use this to start your plugins
+  - [Plugin Demo](https://github.com/npp-plugins/plugindemo) - This shows more complex commands and is a working demo.
+  - [User Manual - How to develop a plugin](https://npp-user-manual.org/docs/plugins/#how-to-develop-a-plugin)
+- **Scintilla Editor**
+  - [Homepage](https://www.scintilla.org/)
+  - [Scintilla source Files](https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/scintilla/)
+  - [README for building of Scintilla](https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/scintilla/README)
+  - [Deep Wiki - Scintilla Editor Component](https://deepwiki.com/notepad-plus-plus/notepad-plus-plus/2.5-scintilla-editor-component)
+  - [`sptr_t` / `uptr_t` are defined in Scintilla.h](https://github.com/notepad-plus-plus/notepad-plus-plus/blob/master/scintilla/include/Scintilla.h#L32-L35)
+- **Notepad++ Code**
+  - [Plugin Communication: Messages and Notifications](https://github.com/notepad-plus-plus/npp-usermanual/blob/master/content/docs/plugin-communication.md)
+    - You can also communicate to the Scintilla editor instances inside Notepad++ by using the Scintilla messages, which are documented at the Scintilla website, and the values can be found in Scintilla.h and/or Scintilla.iface.
+    - Note, you need to use one of the two Scintilla handles as the first parameter to SendMessage api function.
+- **Win32 API - General**
+  - [WPARAM and LPARAM parameters | Stack Overflow](https://stackoverflow.com/questions/6339793/wparam-and-lparam-parameters)
+- **Win32 API - Media Files**
+  - [File Attribute Constants | Microsoft](https://learn.microsoft.com/en-us/windows/win32/fileio/file-attribute-constants)
+  - [Windows Properties | Microsoft](https://learn.microsoft.com/en-us/windows/win32/properties/props)
+  - [Metadata Properties for Media Files | Microsoft](https://learn.microsoft.com/en-us/windows/win32/medfound/metadata-properties-for-media-files)
+  - [What are the file properties in the Windows 11 shell? | Stack Overflow](https://stackoverflow.com/questions/78068319/what-are-the-file-properties-in-the-windows-11-shell) - A user got all the column names giving rise to a full list of file properties.
+**Win32 Error Codes / Windows Debug**
+  - [Debug system error codes | Microsoft](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes)
+  - [System Error Codes (0-499) | Microsoft](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-)
+  - [The Microsoft Error Lookup Tool | Microsoft](https://learn.microsoft.com/en-us/windows/win32/debug/system-error-code-lookup-tool)
+
+- **C++**
+  - [cplusplus.com](https://cplusplus.com/) - Tutorials and Forum
+
+---
+---
+---
 
 ## Licence
 
-This plugin is released under the GPLv3 license
+This plugin is released under the [GNU GPLv3](https://choosealicense.com/licenses/gpl-3.0/) license
