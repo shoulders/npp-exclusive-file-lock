@@ -58,10 +58,13 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 | *(separator)* | — |
 | **Lock Current File** | Manually locks the active tab's file (useful if it was opened before locking was enabled). |
 | **Unlock Current File** | Releases the lock on the active tab's file without closing the tab. |
+| *(separator)* | — |
 | **Show Status** | Concise summary of the current state. Shows option settings (locking, Add Read-only, Logging) and four file lists: **Locked files**, **Read-only files**, **Pseudo Read-only files**, and **Files skipped — open in another process** (see [*File categories in Show Status*](#file-categories-in-show-status)). |
 | *(separator)* | — |
+| **Show Diagnostics** | Displays the captured event log together with a live diagnostic snapshot: Scintilla read-only state, subclass intercept counters, attribute tracking tables, and a Scintilla writability test. |
 | **Enable Logging** | When enabled (✔), captures timestamped diagnostic events to an in-memory log. Enabling clears any previous log and starts fresh. State is saved to the registry and survives Notepad++ restarts. See [*Diagnostics and logging*](#diagnostics-and-logging) below. |
-| **Show Log** | Displays the captured event log together with a live diagnostic snapshot: Scintilla read-only state, subclass intercept counters, attribute tracking tables, and a Scintilla writability test. |
+| *(separator)* | — |
+| **About** | Displays the plugin version, developer information, website link, and licence. |
 
 ---
 
@@ -71,7 +74,7 @@ Calling `CloseHandle()` on the lock handle removes the lock instantly.
 | --- | --- |
 | File opened | If locking is **ON**, the new file is locked immediately. |
 | File saved (including Save-As) | Lock is re-acquired on the new path so the handle always matches the on-disk file. |
-| File renamed in Notepad++ | `NPPN_FILEBEFORERENAME`: lock released. `NPPN_FILERENAMED`: lock re-acquired on new path. `NPPN_FILERENAMECANCEL`: lock restored on original path. |
+| File renamed in Notepad++ | All locks released when the rename command is detected (`WM_COMMAND 41017`). Lock re-acquired under the new name on success, or restored on the original path if cancelled. External renames (Explorer, command line) are still blocked. |
 | File tab closed | Lock is **always** released, regardless of the on/off state. |
 | Notepad++ shutdown | All locks are released. |
 
@@ -173,7 +176,7 @@ preference is stored in the registry so the setting survives Notepad++ restarts.
 
 ### Reading the log
 
-Open **Plugins > ExclusiveFileLock > Show Log** at any time.  The dialog shows:
+Open **Plugins > ExclusiveFileLock > Show Diagnostics** at any time.  The dialog shows:
 
 | Section | Content |
 | --- | --- |
@@ -838,5 +841,4 @@ of the standard API and uses lower-level Windows mechanisms:
 
 ## Licence
 
-This plugin is released into the public domain. Use, modify, and distribute
-freely with no restrictions.
+This plugin is released under the GPLv3 license
