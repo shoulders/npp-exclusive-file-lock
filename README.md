@@ -4,7 +4,7 @@
 >
 > - This is my first CPP app and I used Claude AI to help me, so if you find any issues please report them.
 > - I am not current building an x86 (32-bit) version as I have no way to test it and everyone should be on x64. You can build it yourself if needed.
-> - This plugon is not currently in the NPP plugin catalogue, but once tested I will add it.
+> - This plugin is not currently in the NPP plugin catalogue, but once tested I will add it.
 
 A Windows-exclusive Notepad++ plugin that places an **exclusive file lock** on any file open in the editor, preventing other processes from writing to or deleting the file while it is open. It also can also add a `Read-only` flag to those files at the same time to prevent them being opened and edited by another application that does not obey exclusive file locks (e.g. `notepad.exe`).
 
