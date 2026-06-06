@@ -2104,10 +2104,13 @@ void toggleLocking()
     if (!g_lockingEnabled)
     {
         releaseAllLocks();
-        ::MessageBox(
+        std::wstring msg = L"File locking is now DISABLED.\r\nAll locks have been released.";
+        if (g_addReadOnly)
+            msg += L"\r\n\r\n\"Add Read-only\" is now DISABLED.\r\nThe Read-only file attribute has been restored on all files.";
+        ::MessageBoxW(
             g_nppData._nppHandle,
-            _T("File locking is now DISABLED.\r\nAll locks have been released."),
-            _T("Exclusive File Lock"),
+            msg.c_str(),
+            L"Exclusive File Lock",
             MB_OK | MB_ICONINFORMATION
         );
         return;
@@ -2133,22 +2136,32 @@ void toggleLocking()
         if (!g_lockMap.count(path))
             toOffer.push_back(path);
 
+    static const wchar_t* roDetail =
+        L"\r\n\r\n\"Add Read-only\" is now ENABLED.\r\n"
+        L"The Read-only file attribute is set on locked files,\r\n"
+        L"except when the active tab has focus — the flag is temporarily removed then.\r\n\r\n"
+        L"Files remain fully editable within Notepad++.";
+
     // Message when there are no open files
     if (toOffer.empty())
     {
-        ::MessageBox(
+        std::wstring msg = L"File locking is now ENABLED.\r\nFiles you open will be locked exclusively.";
+        if (g_addReadOnly) msg += roDetail;
+        ::MessageBoxW(
             g_nppData._nppHandle,
-            _T("File locking is now ENABLED.\r\nFiles you open will be locked exclusively."),
-            _T("Exclusive File Lock"),
+            msg.c_str(),
+            L"Exclusive File Lock",
             MB_OK | MB_ICONINFORMATION
         );
         return;
     }
 
     // Message when there are open files
+    std::wstring msg = L"File locking is now ENABLED.\r\nOpened files and files you open will be locked exclusively.";
+    if (g_addReadOnly) msg += roDetail;
     ::MessageBoxW(
         g_nppData._nppHandle,
-        L"File locking is now ENABLED.\r\nOpened files and files you open will be locked exclusively.",
+        msg.c_str(),
         L"Exclusive File Lock",
         MB_OK | MB_ICONINFORMATION);
 
@@ -2680,16 +2693,17 @@ void toggleAddReadOnly()
         for (const auto& kv : g_lockMap)
             applyReadOnly(kv.first);
 
-        ::MessageBox(
-            g_nppData._nppHandle,
-            _T("\"Add Read-only\" is now ENABLED.\r\n"
-               "The Read-only file attribute is set on locked files with\r\n"
-               "the exception that when the active tab is in focus\r\n"
-               "where the flag is temporarily removed.\r\n\r\n"
-               "Files remain fully editable within Notepad++."),
-            _T("Exclusive File Lock"),
-            MB_OK | MB_ICONINFORMATION
-        );
+        if (g_lockingEnabled)
+            ::MessageBox(
+                g_nppData._nppHandle,
+                _T("\"Add Read-only\" is now ENABLED.\r\n"
+                   "The Read-only file attribute is set on locked files with\r\n"
+                   "the exception that when the active tab is in focus\r\n"
+                   "where the flag is temporarily removed.\r\n\r\n"
+                   "Files remain fully editable within Notepad++."),
+                _T("Exclusive File Lock"),
+                MB_OK | MB_ICONINFORMATION
+            );
     }
     else
     {
@@ -2700,13 +2714,14 @@ void toggleAddReadOnly()
         for (const auto& p : paths)
             restoreReadOnly(p);
 
-        ::MessageBox(
-            g_nppData._nppHandle,
-            _T("\"Add Read-only\" is now DISABLED.\r\n"
-               "File attributes have been restored."),
-            _T("Exclusive File Lock"),
-            MB_OK | MB_ICONINFORMATION
-        );
+        if (g_lockingEnabled)
+            ::MessageBox(
+                g_nppData._nppHandle,
+                _T("\"Add Read-only\" is now DISABLED.\r\n"
+                   "File attributes have been restored."),
+                _T("Exclusive File Lock"),
+                MB_OK | MB_ICONINFORMATION
+            );
     }
 }
 

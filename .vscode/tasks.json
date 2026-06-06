@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build ExclusiveFileLock (x64 Release)",
+      "type": "shell",
+      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\" && msbuild vs.proj\\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=x64 /m",
+      "options": {
+        "shell": {
+          "executable": "cmd.exe",
+          "args": ["/C"]
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$msCompile",
+      "detail": "Builds a 64-bit DLL for use with 64-bit Notepad++"
+    },
+    {
+      "label": "Build ExclusiveFileLock (Win32 Release)",
+      "type": "shell",
+      "command": "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Auxiliary\\Build\\vcvars32.bat\" && msbuild vs.proj\\ExclusiveFileLock.vcxproj /p:Configuration=Release /p:Platform=Win32 /m",
+      "options": {
+        "shell": {
+          "executable": "cmd.exe",
+          "args": ["/C"]
+        }
+      },
+      "group": "build",
+      "problemMatcher": "$msCompile",
+      "detail": "Builds a 32-bit DLL for use with 32-bit Notepad++"
+    }
+  ]
+}

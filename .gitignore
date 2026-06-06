@@ -1,7 +1,4 @@
-/.vscode/
 /localonly/
-/nbproject/
 /vendor/
 /vs.proj/ExclusiveFileLock/
 /vs.proj/x64/
-/.php_cs.cache
