@@ -8,7 +8,10 @@
 
 A Windows-exclusive Notepad++ plugin that places an **exclusive file lock** on any file open in the editor, preventing other processes from writing to or deleting the file while it is open. It also can also add a `Read-only` flag to those files at the same time to prevent them being opened and edited by another application that does not obey exclusive file locks (e.g. `notepad.exe`).
 
-One further feature of this plugin is that it will detect files that have open handles to them by other applications and will prevent these files from being locked. This only works with modern applcations (e.g. `word.exe`).
+Some addtional features of this plugin is that
+
+- it will detect files that have open handles to them by other applications and will prevent these files from being locked. This only works with modern applcations (e.g. `word.exe`).
+- when files are locked, you cannot accidentally move them with file explorer.
 
 ---
 
